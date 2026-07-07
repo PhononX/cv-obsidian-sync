@@ -210,6 +210,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
           .onChange(async value => {
             this.plugin.settings.syncInterval = parseInt(value)
             await this.plugin.saveSettings()
+            this.plugin.registerSyncInterval()
           })
       )
 
@@ -246,9 +247,13 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
       .setName('Sync now')
       .setDesc('Trigger an immediate sync')
       .addButton(btn =>
-        btn.setButtonText('Sync now').onClick(() => {
-          new Notice('Carbon Voice: Sync coming soon')
-        })
+        btn
+          .setButtonText('Sync now')
+          .setCta()
+          .onClick(async () => {
+            await this.plugin.runSync()
+            this.display()
+          })
       )
 
     // ── Conversation scope ──────────────────────────────────────────────────
@@ -279,6 +284,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
 
     this.renderImportHistory(containerEl, {
       noun: 'conversation',
+      category: 'conversation',
       windowKey: 'conversationHistoryWindow',
     })
 
@@ -310,6 +316,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
 
     this.renderImportHistory(containerEl, {
       noun: 'voice memo',
+      category: 'voicememo',
       windowKey: 'voiceMemoHistoryWindow',
     })
   }
@@ -320,6 +327,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
     containerEl: HTMLElement,
     opts: {
       noun: string
+      category: 'conversation' | 'voicememo'
       windowKey: 'conversationHistoryWindow' | 'voiceMemoHistoryWindow'
     }
   ): void {
@@ -341,8 +349,9 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
           })
       )
       .addButton(btn =>
-        btn.setButtonText('Import').onClick(() => {
-          new Notice(`Carbon Voice: ${opts.noun} history import coming soon`)
+        btn.setButtonText('Import').onClick(async () => {
+          await this.plugin.runImport(opts.category, this.plugin.settings[opts.windowKey])
+          this.display()
         })
       )
   }

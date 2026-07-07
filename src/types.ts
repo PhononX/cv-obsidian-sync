@@ -48,11 +48,19 @@ export interface CarbonVoiceAudioModel {
   is_original_audio: boolean
 }
 
+export interface CarbonVoiceTimecode {
+  t: string // token/word text
+  s: number // start ms
+  e: number // end ms
+}
+
 export interface CarbonVoiceTextModel {
   type: string
   audio_id: string | null
   language_id: string
   value: string
+  // For audio transcripts, `value` is empty and the words live here instead.
+  timecodes?: CarbonVoiceTimecode[]
 }
 
 export interface CarbonVoiceAttachment {
@@ -77,6 +85,7 @@ export interface CarbonVoiceMessage {
   parent_message_id: string | null
   name: string | null
   is_text_message: boolean
+  status: string | null
   type: MessageType | null
   folder_id: string | null
   duration_ms: number
