@@ -1,0 +1,10 @@
+{
+  "id": "carbon-voice-sync",
+  "name": "Carbon Voice Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Sync Carbon Voice async voice conversations into your Obsidian vault",
+  "author": "Carbon Voice",
+  "authorUrl": "https://getcarbon.app",
+  "isDesktopOnly": true
+}

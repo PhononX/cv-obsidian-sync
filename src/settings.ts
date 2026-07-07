@@ -1,0 +1,955 @@
+import { App, Modal, Notice, PluginSettingTab, Setting } from 'obsidian'
+import type CarbonVoiceSyncPlugin from './main'
+import { CarbonVoiceAPI } from './api'
+import type {
+  CarbonVoiceUser,
+  CarbonVoiceChannel,
+  CarbonVoiceWorkspace,
+  CarbonVoiceFolder,
+  WorkspaceType,
+  WorkspaceRole,
+  SyncScope,
+} from './types'
+
+// Small first batch for a snappy initial load, then larger pages — mirrors the reference client.
+const CHANNEL_FIRST_PAGE_SIZE = 20
+const CHANNEL_PAGE_SIZE = 200
+const WORKSPACE_PAGE_SIZE = 100
+
+class TokenModal extends Modal {
+  private token: string
+  private onSuccess: (token: string, user: CarbonVoiceUser) => void
+  private statusEl: HTMLElement | null = null
+
+  constructor(
+    app: App,
+    existingToken: string,
+    onSuccess: (token: string, user: CarbonVoiceUser) => void
+  ) {
+    super(app)
+    this.token = existingToken
+    this.onSuccess = onSuccess
+  }
+
+  onOpen() {
+    const { contentEl } = this
+    contentEl.createEl('h3', { text: 'Connect Carbon Voice' })
+    contentEl.createEl('p', {
+      text: 'Generate a Personal Access Token at developer.carbonvoice.app',
+      cls: 'setting-item-description',
+    })
+
+    new Setting(contentEl)
+      .setName('API token')
+      .addText(text => {
+        text
+          .setPlaceholder('Paste your token here')
+          .setValue(this.token)
+          .onChange(value => {
+            this.token = value.trim()
+            if (this.statusEl) this.statusEl.style.display = 'none'
+          })
+        text.inputEl.type = 'password'
+        text.inputEl.style.width = '100%'
+      })
+
+    this.statusEl = contentEl.createDiv()
+    this.statusEl.style.cssText =
+      'display:none; margin:0 0 0.75rem; padding:0.4rem 0.6rem; border-radius:4px; font-size:0.875rem;'
+
+    new Setting(contentEl)
+      .addButton(btn =>
+        btn
+          .setButtonText('Connect')
+          .setCta()
+          .onClick(async () => {
+            if (!this.token) return
+            btn.setButtonText('Connecting…')
+            btn.setDisabled(true)
+            if (this.statusEl) this.statusEl.style.display = 'none'
+
+            try {
+              const api = new CarbonVoiceAPI(this.token)
+              const user = await api.getCurrentUser()
+              this.onSuccess(this.token, user)
+              this.close()
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : 'Unknown error'
+              if (this.statusEl) {
+                this.statusEl.style.display = 'block'
+                this.statusEl.style.background = '#f8d7da'
+                this.statusEl.style.color = '#721c24'
+                this.statusEl.setText(`✗ ${msg}`)
+              }
+              btn.setButtonText('Connect')
+              btn.setDisabled(false)
+            }
+          })
+      )
+      .addButton(btn => btn.setButtonText('Cancel').onClick(() => this.close()))
+  }
+
+  onClose() {
+    this.contentEl.empty()
+  }
+}
+
+export class CarbonVoiceSettingTab extends PluginSettingTab {
+  plugin: CarbonVoiceSyncPlugin
+
+  // Cached conversation list, lazily paged in when the "Selected conversations" scope is active.
+  private channels: CarbonVoiceChannel[] | null = null
+  private channelsLoading = false
+  private channelsError: string | null = null
+  private channelsHasMore = true
+  // Epoch-ms of the oldest channel loaded so far; the next "older" page starts from here.
+  private channelsCursorMs: number | null = null
+
+  // Workspaces are a small, bounded set, so we load them fully (all pages) when the
+  // "By workspace" scope is active. Guest membership is resolved by querying the API's
+  // roles filter rather than reading a field off the workspace object.
+  private workspaces: CarbonVoiceWorkspace[] | null = null
+  private workspacesLoading = false
+  private workspacesError: string | null = null
+  private guestWorkspaceIds = new Set<string>()
+
+  // Voice-memo folders (full tree), loaded fully when the "By folder" scope is active.
+  private folders: CarbonVoiceFolder[] | null = null
+  private foldersLoading = false
+  private foldersError: string | null = null
+
+  // Filter text for each dual-listbox, persisted so it survives a "Load more" re-render.
+  private channelFilter = ''
+  private workspaceFilter = ''
+  private folderFilter = ''
+
+  constructor(app: App, plugin: CarbonVoiceSyncPlugin) {
+    super(app, plugin)
+    this.plugin = plugin
+  }
+
+  display(): void {
+    const { containerEl } = this
+    containerEl.empty()
+
+    // ── Synced Account ───────────────────────────────────────────────────────
+
+    containerEl.createEl('h2', { text: 'Synced Account' })
+
+    const {
+      apiToken,
+      connectedUserId,
+      connectedUserName,
+      connectedUserAvatarUrl,
+      connectedIdentityEmails,
+      lastTokenValidated,
+    } = this.plugin.settings
+
+    if (!apiToken) {
+      new Setting(containerEl)
+        .setName('No API token set')
+        .setDesc('Add a token to connect your Carbon Voice account')
+        .addButton(btn =>
+          btn
+            .setButtonText('Add Token')
+            .setCta()
+            .onClick(() => this.openTokenModal())
+        )
+    } else {
+      const name = connectedUserName ?? 'Unknown Account'
+      const idPart = connectedUserId ? `User ID: ${connectedUserId}` : ''
+      const validatedPart = lastTokenValidated
+        ? `Token last validated ${new Date(lastTokenValidated).toLocaleString()}`
+        : 'Validating…'
+      const validatedDesc = idPart ? `${idPart} · ${validatedPart}` : validatedPart
+
+      const accountSetting = new Setting(containerEl)
+        .setDesc(validatedDesc)
+        .addButton(btn =>
+          btn.setButtonText('Change Token').onClick(() => this.openTokenModal())
+        )
+
+      this.buildAccountNameEl(
+        accountSetting.nameEl,
+        name,
+        connectedIdentityEmails ?? [],
+        connectedUserAvatarUrl ?? null
+      )
+
+      this.validateToken(accountSetting.descEl, accountSetting.nameEl)
+    }
+
+    // ── Sync ────────────────────────────────────────────────────────────────
+
+    containerEl.createEl('h2', { text: 'Sync' })
+
+    new Setting(containerEl)
+      .setName('Sync folder')
+      .setDesc('Root vault folder where all synced content is written')
+      .addText(text =>
+        text
+          .setPlaceholder('Carbon Voice')
+          .setValue(this.plugin.settings.syncFolder)
+          .onChange(async value => {
+            this.plugin.settings.syncFolder = value.trim() || 'Carbon Voice'
+            await this.plugin.saveSettings()
+          })
+      )
+
+    new Setting(containerEl)
+      .setName('Sync interval')
+      .setDesc('How often to automatically sync in the background')
+      .addDropdown(drop =>
+        drop
+          .addOption('0', 'Manual only')
+          .addOption('5', 'Every 5 minutes')
+          .addOption('15', 'Every 15 minutes')
+          .addOption('30', 'Every 30 minutes')
+          .addOption('60', 'Every hour')
+          .setValue(String(this.plugin.settings.syncInterval))
+          .onChange(async value => {
+            this.plugin.settings.syncInterval = parseInt(value)
+            await this.plugin.saveSettings()
+          })
+      )
+
+    new Setting(containerEl)
+      .setName('Include transcripts')
+      .setDesc('When off, message transcripts are omitted from notes')
+      .addToggle(toggle =>
+        toggle
+          .setValue(this.plugin.settings.includeTranscripts)
+          .onChange(async value => {
+            this.plugin.settings.includeTranscripts = value
+            await this.plugin.saveSettings()
+          })
+      )
+
+    new Setting(containerEl)
+      .setName('Sync on startup')
+      .setDesc('Automatically sync when Obsidian opens')
+      .addToggle(toggle =>
+        toggle
+          .setValue(this.plugin.settings.syncOnStartup)
+          .onChange(async value => {
+            this.plugin.settings.syncOnStartup = value
+            await this.plugin.saveSettings()
+          })
+      )
+
+    const lastSynced = this.plugin.settings.lastSyncTimestamp
+    new Setting(containerEl)
+      .setName('Last synced')
+      .setDesc(lastSynced ? new Date(lastSynced).toLocaleString() : 'Never')
+
+    new Setting(containerEl)
+      .setName('Sync now')
+      .setDesc('Trigger an immediate sync')
+      .addButton(btn =>
+        btn.setButtonText('Sync now').onClick(() => {
+          new Notice('Carbon Voice: Sync coming soon')
+        })
+      )
+
+    // ── Conversation scope ──────────────────────────────────────────────────
+
+    containerEl.createEl('h2', { text: 'Conversation scope' })
+
+    new Setting(containerEl)
+      .setName('Scope')
+      .setDesc('Sync every conversation, only those in chosen workspaces, or a hand-picked set')
+      .addDropdown(drop =>
+        drop
+          .addOption('all', 'All conversations')
+          .addOption('by_workspace', 'Conversations in selected workspaces')
+          .addOption('by_conversation', 'Selected conversations')
+          .setValue(this.plugin.settings.conversationScope)
+          .onChange(async value => {
+            this.plugin.settings.conversationScope = value as SyncScope
+            await this.plugin.saveSettings()
+            this.display()
+          })
+      )
+
+    if (this.plugin.settings.conversationScope === 'by_workspace') {
+      this.renderWorkspaceSelector(containerEl, this.idAccessors('conversationWorkspaceIds'))
+    } else if (this.plugin.settings.conversationScope === 'by_conversation') {
+      this.renderConversationSelector(containerEl)
+    }
+
+    this.renderImportHistory(containerEl, {
+      noun: 'conversation',
+      windowKey: 'conversationHistoryWindow',
+    })
+
+    // ── Voice memo scope ────────────────────────────────────────────────────
+
+    containerEl.createEl('h2', { text: 'Voice memo scope' })
+
+    new Setting(containerEl)
+      .setName('Scope')
+      .setDesc('Sync every voice memo, only those in chosen workspaces, or specific folders')
+      .addDropdown(drop =>
+        drop
+          .addOption('all', 'All voice memos')
+          .addOption('by_workspace', 'Voice memos in selected workspaces')
+          .addOption('by_folder', 'Voice memos in selected folders')
+          .setValue(this.plugin.settings.voiceMemoScope)
+          .onChange(async value => {
+            this.plugin.settings.voiceMemoScope = value as SyncScope
+            await this.plugin.saveSettings()
+            this.display()
+          })
+      )
+
+    if (this.plugin.settings.voiceMemoScope === 'by_workspace') {
+      this.renderWorkspaceSelector(containerEl, this.idAccessors('voiceMemoWorkspaceIds'))
+    } else if (this.plugin.settings.voiceMemoScope === 'by_folder') {
+      this.renderFolderSelector(containerEl)
+    }
+
+    this.renderImportHistory(containerEl, {
+      noun: 'voice memo',
+      windowKey: 'voiceMemoHistoryWindow',
+    })
+  }
+
+  // Per-category historical import: forward sync only pulls new activity, so this lets the
+  // user pull older data for one category, honouring that category's scope above.
+  private renderImportHistory(
+    containerEl: HTMLElement,
+    opts: {
+      noun: string
+      windowKey: 'conversationHistoryWindow' | 'voiceMemoHistoryWindow'
+    }
+  ): void {
+    new Setting(containerEl)
+      .setName('Import history')
+      .setDesc(`Pull past ${opts.noun}s into your vault (respects the scope above)`)
+      .addDropdown(drop =>
+        drop
+          .addOption('7', 'Last 7 days')
+          .addOption('30', 'Last 30 days')
+          .addOption('90', 'Last 90 days')
+          .addOption('365', 'Last year')
+          .addOption('all', 'All time')
+          .setValue(String(this.plugin.settings[opts.windowKey]))
+          .onChange(async value => {
+            this.plugin.settings[opts.windowKey] =
+              value === 'all' ? 'all' : (parseInt(value) as 7 | 30 | 90 | 365)
+            await this.plugin.saveSettings()
+          })
+      )
+      .addButton(btn =>
+        btn.setButtonText('Import').onClick(() => {
+          new Notice(`Carbon Voice: ${opts.noun} history import coming soon`)
+        })
+      )
+  }
+
+  private channelName(c: CarbonVoiceChannel): string {
+    return c.channel_name?.trim() || `Untitled ${c.type} (${c.channel_guid.slice(0, 8)})`
+  }
+
+  // sort_order is a date; the wire format may be epoch-ms (like the other channel timestamps)
+  // or an ISO string, so normalise to epoch-ms for sorting/formatting.
+  private sortOrderMs(c: CarbonVoiceChannel): number {
+    const v = c.sort_order
+    if (v == null) return 0
+    if (typeof v === 'number') return v
+    const parsed = Date.parse(v)
+    return Number.isNaN(parsed) ? 0 : parsed
+  }
+
+  private channelSublabel(c: CarbonVoiceChannel): string {
+    const parts: string[] = []
+    if (c.workspace_name) parts.push(c.workspace_name)
+    const ms = this.sortOrderMs(c)
+    if (ms) parts.push(new Date(ms).toLocaleString())
+    return parts.join(' · ')
+  }
+
+  // Pages backwards through /channels/recent, mirroring the reference client: always fetch
+  // `older` starting from `now` (empty cache) or from the oldest channel already loaded.
+  // last_updated_ts is epoch milliseconds; the `date` cursor is sent as an ISO timestamp.
+  private async loadMoreChannels(): Promise<void> {
+    if (this.channelsLoading) return
+    this.channelsLoading = true
+    this.channelsError = null
+    try {
+      const api = new CarbonVoiceAPI(this.plugin.settings.apiToken)
+      const existing = this.channels ?? []
+      const isFirstPage = existing.length === 0
+      const limit = isFirstPage ? CHANNEL_FIRST_PAGE_SIZE : CHANNEL_PAGE_SIZE
+      const cursorMs = isFirstPage ? Date.now() : this.channelsCursorMs ?? Date.now()
+
+      const page = await api.getRecentChannels({
+        limit,
+        direction: 'older',
+        date: new Date(cursorMs).toISOString(),
+      })
+
+      const seen = new Set(existing.map(c => c.channel_guid))
+      const fresh = page.filter(c => !seen.has(c.channel_guid))
+      this.channels = [...existing, ...fresh]
+
+      // Advance the cursor to the oldest channel now loaded; if it can't move older, stop.
+      const newOldestMs = this.channels.reduce(
+        (min, c) => Math.min(min, c.last_updated_ts ?? Infinity),
+        Infinity
+      )
+      const advanced = this.channelsCursorMs == null || newOldestMs < this.channelsCursorMs
+      if (Number.isFinite(newOldestMs)) this.channelsCursorMs = newOldestMs
+      this.channelsHasMore = page.length >= limit && fresh.length > 0 && advanced
+    } catch (err) {
+      this.channelsError = err instanceof Error ? err.message : 'Failed to load conversations'
+    } finally {
+      this.channelsLoading = false
+      this.display()
+    }
+  }
+
+  // Loads every workspace across the sections we display. Guest standard workspaces come from
+  // a dedicated roles=guest query so we never have to infer role from the response body.
+  private async loadWorkspaces(): Promise<void> {
+    if (this.workspacesLoading) return
+    this.workspacesLoading = true
+    this.workspacesError = null
+    try {
+      const api = new CarbonVoiceAPI(this.plugin.settings.apiToken)
+      const [nonGuest, guest, webcontact] = await Promise.all([
+        this.fetchAllWorkspaces(api, {
+          types: ['standard'],
+          roles: ['admin', 'owner', 'creator', 'member'],
+        }),
+        this.fetchAllWorkspaces(api, { types: ['standard'], roles: ['guest'] }),
+        this.fetchAllWorkspaces(api, { types: ['webcontact'] }),
+      ])
+      this.guestWorkspaceIds = new Set(guest.map(w => w.id))
+      const byId = new Map<string, CarbonVoiceWorkspace>()
+      for (const w of [...nonGuest, ...guest, ...webcontact]) byId.set(w.id, w)
+      this.workspaces = [...byId.values()]
+    } catch (err) {
+      this.workspacesError = err instanceof Error ? err.message : 'Failed to load workspaces'
+    } finally {
+      this.workspacesLoading = false
+      this.display()
+    }
+  }
+
+  // Pages a single workspace query to completion via next_cursor / starting_after.
+  private async fetchAllWorkspaces(
+    api: CarbonVoiceAPI,
+    params: { types?: WorkspaceType[]; roles?: WorkspaceRole[] }
+  ): Promise<CarbonVoiceWorkspace[]> {
+    const out: CarbonVoiceWorkspace[] = []
+    const seen = new Set<string>()
+    let cursor: string | null = null
+    // Safety cap — workspaces are few; this only guards against a misbehaving cursor.
+    for (let page = 0; page < 50; page++) {
+      const res = await api.getWorkspaces({
+        ...params,
+        limit: WORKSPACE_PAGE_SIZE,
+        ...(cursor ? { starting_after: cursor } : {}),
+      })
+      for (const w of res.results) {
+        if (!seen.has(w.id)) {
+          seen.add(w.id)
+          out.push(w)
+        }
+      }
+      if (!res.has_more || !res.next_cursor || res.next_cursor === cursor) break
+      cursor = res.next_cursor
+    }
+    return out
+  }
+
+  // Reusable dual-listbox: Available items on the left (filterable + paged), Selected on the
+  // right. Clicking a row moves it across. Moves re-render only the panes so filter/scroll
+  // survive; "Load more" fetches a page and triggers a full settings re-render.
+  private renderDualListbox(
+    containerEl: HTMLElement,
+    opts: {
+      noun: string
+      items: Array<{ id: string; label: string; sublabel: string; section?: string }> | null
+      loading: boolean
+      error: string | null
+      hasMore: boolean
+      filter: string
+      // Section headers (with separator lines) for the Available pane, in display order.
+      sectionOrder?: string[]
+      getSelectedIds: () => string[]
+      onFilter: (value: string) => void
+      onLoad: () => void
+      onRetry: () => void
+      onAdd: (id: string) => Promise<void>
+      onRemove: (id: string) => Promise<void>
+    }
+  ): void {
+    if (!this.plugin.settings.apiToken) {
+      new Setting(containerEl).setDesc(`Connect your account to choose ${opts.noun}s.`)
+      return
+    }
+
+    if (opts.error) {
+      new Setting(containerEl)
+        .setName(`Could not load ${opts.noun}s`)
+        .setDesc(opts.error)
+        .addButton(btn => btn.setButtonText('Retry').onClick(() => opts.onRetry()))
+      return
+    }
+
+    if (opts.items === null) {
+      if (!opts.loading) opts.onLoad()
+      new Setting(containerEl).setName(`Loading ${opts.noun}s…`)
+      return
+    }
+
+    const items = opts.items
+    let filterText = opts.filter
+
+    const wrap = containerEl.createDiv()
+    wrap.style.cssText =
+      'display:flex; gap:12px; flex-wrap:wrap; margin:8px 0 16px;'
+
+    const paneStyle =
+      'flex:1; min-width:240px; border:1px solid var(--background-modifier-border); border-radius:6px; padding:8px;'
+    const listStyle =
+      'max-height:220px; overflow-y:auto; margin-top:6px; display:flex; flex-direction:column; gap:2px;'
+    const headerStyle = 'font-weight:600; font-size:0.85em;'
+
+    // ── Left pane: available ──
+    const left = wrap.createDiv()
+    left.style.cssText = paneStyle
+    const leftHeader = left.createDiv()
+    leftHeader.style.cssText = headerStyle
+    const filterInput = left.createEl('input', { type: 'text' })
+    filterInput.placeholder = `Filter ${opts.noun}s…`
+    filterInput.value = filterText
+    filterInput.style.cssText = 'width:100%; margin-top:6px; box-sizing:border-box;'
+    const leftList = left.createDiv()
+    leftList.style.cssText = listStyle
+
+    // ── Right pane: selected ──
+    const right = wrap.createDiv()
+    right.style.cssText = paneStyle
+    const rightHeader = right.createDiv()
+    rightHeader.style.cssText = headerStyle
+    const rightList = right.createDiv()
+    rightList.style.cssText = listStyle
+
+    const makeSectionHeader = (listEl: HTMLElement, title: string, isFirst: boolean) => {
+      const h = listEl.createDiv({ text: title })
+      h.style.cssText =
+        'padding:6px 8px 2px; font-size:0.72em; font-weight:600; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-muted);' +
+        (isFirst ? '' : ' border-top:1px solid var(--background-modifier-border); margin-top:4px;')
+    }
+
+    const makeRow = (
+      listEl: HTMLElement,
+      item: { id: string; label: string; sublabel: string; section?: string },
+      side: 'available' | 'selected'
+    ) => {
+      const row = listEl.createDiv()
+      row.style.cssText =
+        'padding:4px 8px; border-radius:4px; cursor:pointer; display:flex; align-items:center; justify-content:space-between; gap:8px;'
+      const text = row.createDiv()
+      text.createDiv({ text: item.label }).style.cssText = 'font-size:0.9em;'
+      if (item.sublabel) {
+        text.createDiv({ text: item.sublabel }).style.cssText =
+          'font-size:0.78em; color:var(--text-muted);'
+      }
+      const icon = row.createSpan({ text: side === 'available' ? '+' : '×' })
+      icon.style.cssText = 'color:var(--text-muted); font-size:1.1em;'
+      row.onmouseenter = () => (row.style.background = 'var(--background-modifier-hover)')
+      row.onmouseleave = () => (row.style.background = '')
+      row.onclick = async () => {
+        if (side === 'available') await opts.onAdd(item.id)
+        else await opts.onRemove(item.id)
+        renderPanes()
+      }
+    }
+
+    const muted = (listEl: HTMLElement, text: string) => {
+      const el = listEl.createDiv({ text })
+      el.style.cssText = 'padding:6px 8px; font-size:0.82em; color:var(--text-muted);'
+    }
+
+    const renderPanes = () => {
+      const selected = opts.getSelectedIds()
+      const selectedSet = new Set(selected)
+      const f = filterText.trim().toLowerCase()
+      const available = items.filter(
+        i =>
+          !selectedSet.has(i.id) &&
+          (!f || i.label.toLowerCase().includes(f) || i.sublabel.toLowerCase().includes(f))
+      )
+
+      leftHeader.setText(`Available (${available.length})`)
+      rightHeader.setText(`Selected (${selected.length})`)
+
+      leftList.empty()
+      if (available.length === 0) {
+        muted(leftList, f ? 'No matches in loaded items' : `No ${opts.noun}s available`)
+      } else if (!opts.sectionOrder) {
+        available.forEach(i => makeRow(leftList, i, 'available'))
+      } else {
+        const groups = new Map<string, typeof available>()
+        for (const i of available) {
+          const s = i.section ?? ''
+          const arr = groups.get(s) ?? []
+          arr.push(i)
+          groups.set(s, arr)
+        }
+        // Known sections first (in declared order), then any leftovers.
+        const ordered = [
+          ...opts.sectionOrder.filter(s => groups.has(s)),
+          ...[...groups.keys()].filter(s => !opts.sectionOrder!.includes(s)),
+        ]
+        let firstSection = true
+        for (const s of ordered) {
+          const group = groups.get(s)
+          if (!group || group.length === 0) continue
+          makeSectionHeader(leftList, s || 'Other', firstSection)
+          firstSection = false
+          group.forEach(i => makeRow(leftList, i, 'available'))
+        }
+      }
+      if (opts.hasMore) {
+        const more = leftList.createDiv({
+          text: opts.loading ? 'Loading…' : `Load more (filters loaded items only)`,
+        })
+        more.style.cssText =
+          'padding:6px 8px; margin-top:2px; text-align:center; font-size:0.82em; color:var(--text-accent); cursor:pointer;'
+        more.onclick = () => {
+          more.setText('Loading…')
+          opts.onLoad()
+        }
+      }
+
+      rightList.empty()
+      if (selected.length === 0) {
+        muted(rightList, `None selected — nothing will sync until you add at least one`)
+      } else {
+        selected.forEach(id => {
+          const item = items.find(i => i.id === id) ?? { id, label: id, sublabel: '' }
+          makeRow(rightList, item, 'selected')
+        })
+      }
+    }
+
+    filterInput.oninput = () => {
+      filterText = filterInput.value
+      opts.onFilter(filterText)
+      renderPanes()
+    }
+
+    renderPanes()
+  }
+
+  private renderConversationSelector(containerEl: HTMLElement): void {
+    const items =
+      this.channels === null
+        ? null
+        : [...this.channels]
+            .sort((a, b) => this.sortOrderMs(b) - this.sortOrderMs(a))
+            .map(c => ({
+              id: c.channel_guid,
+              label: this.channelName(c),
+              sublabel: this.channelSublabel(c),
+            }))
+
+    this.renderDualListbox(containerEl, {
+      noun: 'conversation',
+      items,
+      loading: this.channelsLoading,
+      error: this.channelsError,
+      hasMore: this.channelsHasMore,
+      filter: this.channelFilter,
+      getSelectedIds: () => this.plugin.settings.conversationIds,
+      onFilter: value => {
+        this.channelFilter = value
+      },
+      onLoad: () => void this.loadMoreChannels(),
+      onRetry: () => {
+        this.channels = null
+        this.channelsError = null
+        this.channelsHasMore = true
+        this.channelsCursorMs = null
+        this.display()
+      },
+      onAdd: async id => {
+        if (!this.plugin.settings.conversationIds.includes(id)) {
+          this.plugin.settings.conversationIds.push(id)
+          await this.plugin.saveSettings()
+        }
+      },
+      onRemove: async id => {
+        this.plugin.settings.conversationIds = this.plugin.settings.conversationIds.filter(
+          x => x !== id
+        )
+        await this.plugin.saveSettings()
+      },
+    })
+  }
+
+  private workspaceSection(w: CarbonVoiceWorkspace): string {
+    // The personal workspace is flagged by a sentinel id/guid of "Personal".
+    if (w.id?.toLowerCase() === 'personal') return 'Personal'
+    if (w.type === 'webcontact') return 'Business Carbon Links'
+    // Guest membership comes from the roles=guest query, not a field on the object.
+    if (this.guestWorkspaceIds.has(w.id)) return 'Guest Workspaces'
+    return 'Workspaces'
+  }
+
+  // Add/remove accessors for a string[] setting, shared by every selector.
+  private idAccessors(key: 'conversationIds' | 'conversationWorkspaceIds' | 'voiceMemoWorkspaceIds' | 'voiceMemoFolderIds') {
+    return {
+      getSelectedIds: () => this.plugin.settings[key],
+      onAdd: async (id: string) => {
+        if (!this.plugin.settings[key].includes(id)) {
+          this.plugin.settings[key].push(id)
+          await this.plugin.saveSettings()
+        }
+      },
+      onRemove: async (id: string) => {
+        this.plugin.settings[key] = this.plugin.settings[key].filter(x => x !== id)
+        await this.plugin.saveSettings()
+      },
+    }
+  }
+
+  // Workspace selector, reused for both conversation and voice-memo workspace scopes.
+  private renderWorkspaceSelector(
+    containerEl: HTMLElement,
+    sel: {
+      getSelectedIds: () => string[]
+      onAdd: (id: string) => Promise<void>
+      onRemove: (id: string) => Promise<void>
+    }
+  ): void {
+    const items =
+      this.workspaces === null
+        ? null
+        : this.workspaces.map(w => ({
+            id: w.id,
+            label: w.name,
+            sublabel: w.vanity_name ?? '',
+            section: this.workspaceSection(w),
+          }))
+
+    this.renderDualListbox(containerEl, {
+      noun: 'workspace',
+      items,
+      sectionOrder: ['Personal', 'Workspaces', 'Guest Workspaces', 'Business Carbon Links'],
+      loading: this.workspacesLoading,
+      error: this.workspacesError,
+      hasMore: false, // all workspaces are loaded up front
+      filter: this.workspaceFilter,
+      getSelectedIds: sel.getSelectedIds,
+      onFilter: value => {
+        this.workspaceFilter = value
+      },
+      onLoad: () => void this.loadWorkspaces(),
+      onRetry: () => {
+        this.workspaces = null
+        this.workspacesError = null
+        this.guestWorkspaceIds = new Set()
+        this.display()
+      },
+      onAdd: sel.onAdd,
+      onRemove: sel.onRemove,
+    })
+  }
+
+  // ── Folders ─────────────────────────────────────────────────────────────
+
+  private async loadFolders(): Promise<void> {
+    if (this.foldersLoading) return
+    this.foldersLoading = true
+    this.foldersError = null
+    try {
+      const api = new CarbonVoiceAPI(this.plugin.settings.apiToken)
+      const roots = await api.getFolders({
+        type: 'voicememo',
+        include_all_tree: true,
+        sort_by: 'name',
+        sort_direction: 'ASC',
+      })
+      // Flatten roots + any nested subfolders into one list, deduped by id.
+      const byId = new Map<string, CarbonVoiceFolder>()
+      const walk = (f: CarbonVoiceFolder) => {
+        if (byId.has(f.id)) return
+        byId.set(f.id, f)
+        f.subfolders?.forEach(walk)
+      }
+      roots.forEach(walk)
+      this.folders = [...byId.values()]
+    } catch (err) {
+      this.foldersError = err instanceof Error ? err.message : 'Failed to load folders'
+    } finally {
+      this.foldersLoading = false
+      this.display()
+    }
+  }
+
+  // Builds "Root / Parent / This" from the folder's ancestor-id path (parent-first).
+  private folderFullPath(f: CarbonVoiceFolder, nameById: Map<string, string>): string {
+    const ancestors = [...(f.path ?? [])].reverse().map(id => nameById.get(id) ?? '…')
+    return [...ancestors, f.name].join(' / ')
+  }
+
+  private renderFolderSelector(containerEl: HTMLElement): void {
+    // Folder names can collide across workspaces, so we group folders under a per-workspace
+    // separator. Folders only carry workspace_id, so resolve names from the workspace cache
+    // (loaded on demand); the view re-renders with proper names once it arrives.
+    if (this.workspaces === null && !this.workspacesLoading) void this.loadWorkspaces()
+    const wsNameById = new Map<string, string>()
+    if (this.workspaces) for (const w of this.workspaces) wsNameById.set(w.id, w.name)
+    const wsSection = (wsId: string) =>
+      wsNameById.get(wsId) ?? (wsId === 'Personal' ? 'Personal' : wsId)
+
+    const nameById = new Map<string, string>()
+    if (this.folders) for (const f of this.folders) nameById.set(f.id, f.name)
+
+    // One separator per workspace that has folders; personal workspace first, then alphabetical.
+    const wsIds = this.folders ? [...new Set(this.folders.map(f => f.workspace_id))] : []
+    wsIds.sort((a, b) => {
+      if (a === 'Personal') return -1
+      if (b === 'Personal') return 1
+      return wsSection(a).localeCompare(wsSection(b))
+    })
+    const sectionOrder = wsIds.map(wsSection)
+
+    // A synthetic "root" target per workspace, for memos that live at the workspace root and
+    // aren't in any folder. The sync engine treats `root:<workspace_id>` as exactly that.
+    const rootItems = wsIds.map(wsId => ({
+      id: `root:${wsId}`,
+      label: `${wsSection(wsId)} — root`,
+      sublabel: 'Memos not in any folder',
+      section: wsSection(wsId),
+    }))
+
+    const items =
+      this.folders === null
+        ? null
+        : [
+            ...rootItems,
+            ...this.folders
+              .map(f => {
+                const count = f.total_nested_messages_count
+                return {
+                  id: f.id,
+                  label: this.folderFullPath(f, nameById),
+                  sublabel: `${count} memo${count === 1 ? '' : 's'}`,
+                  section: wsSection(f.workspace_id),
+                }
+              })
+              .sort((a, b) => a.label.localeCompare(b.label)),
+          ]
+
+    this.renderDualListbox(containerEl, {
+      noun: 'folder',
+      items,
+      sectionOrder,
+      loading: this.foldersLoading,
+      error: this.foldersError,
+      hasMore: false, // full tree is loaded up front
+      filter: this.folderFilter,
+      onFilter: value => {
+        this.folderFilter = value
+      },
+      onLoad: () => void this.loadFolders(),
+      onRetry: () => {
+        this.folders = null
+        this.foldersError = null
+        this.display()
+      },
+      ...this.idAccessors('voiceMemoFolderIds'),
+    })
+  }
+
+  private buildAccountNameEl(
+    nameEl: HTMLElement,
+    name: string,
+    emails: string[],
+    avatarUrl: string | null
+  ): void {
+    nameEl.empty()
+
+    if (avatarUrl) {
+      const img = nameEl.createEl('img')
+      img.src = avatarUrl
+      img.style.cssText =
+        'width:22px; height:22px; border-radius:50%; margin-right:7px; vertical-align:middle; object-fit:cover;'
+    }
+
+    nameEl.appendText(name)
+
+    if (emails.length > 0) {
+      const emailSpan = nameEl.createEl('span', { text: ` · ${emails[0]}` })
+      emailSpan.style.color = 'var(--text-muted)'
+      if (emails.length > 1) {
+        emailSpan.title = emails.slice(1).join('\n')
+        emailSpan.style.cssText +=
+          '; cursor: help; text-decoration: underline dotted var(--text-muted);'
+      }
+    }
+  }
+
+  private async validateToken(descEl: HTMLElement, nameEl: HTMLElement): Promise<void> {
+    try {
+      const api = new CarbonVoiceAPI(this.plugin.settings.apiToken)
+      const user = await api.getCurrentUser()
+
+      const emails = user.identities?.map(id => id.provider_email).filter((e): e is string => !!e) ?? []
+      const avatarUrl = user.image_url
+
+      this.plugin.settings.connectedUserId = user.user_guid
+      this.plugin.settings.connectedUserName = `${user.first_name} ${user.last_name}`.trim()
+      this.plugin.settings.connectedUserAvatarUrl = avatarUrl
+      this.plugin.settings.connectedIdentityEmails = emails
+      this.plugin.settings.lastTokenValidated = new Date().toISOString()
+      await this.plugin.saveSettings()
+
+      descEl.style.color = ''
+      descEl.setText(`User ID: ${user.user_guid} · Token last validated ${new Date().toLocaleString()}`)
+
+      this.buildAccountNameEl(nameEl, `${user.first_name} ${user.last_name}`.trim(), emails, avatarUrl)
+    } catch {
+      const last = this.plugin.settings.lastTokenValidated
+      const lastStr = last ? ` · Last validated ${new Date(last).toLocaleString()}` : ''
+      descEl.style.color = 'var(--text-error)'
+      descEl.setText(`Token validation failed${lastStr}`)
+    }
+  }
+
+  private openTokenModal(): void {
+    new TokenModal(
+      this.app,
+      this.plugin.settings.apiToken,
+      async (token, user) => {
+        const emails = user.identities?.map(id => id.provider_email).filter((e): e is string => !!e) ?? []
+        const avatarUrl = user.image_url
+
+        this.plugin.settings.apiToken = token
+        this.plugin.settings.connectedUserId = user.user_guid
+        this.plugin.settings.connectedUserName = `${user.first_name} ${user.last_name}`.trim()
+        this.plugin.settings.connectedUserAvatarUrl = avatarUrl
+        this.plugin.settings.connectedIdentityEmails = emails
+        this.plugin.settings.lastTokenValidated = new Date().toISOString()
+        await this.plugin.saveSettings()
+        this.channels = null
+        this.channelsError = null
+        this.channelsHasMore = true
+        this.channelsCursorMs = null
+        this.workspaces = null
+        this.workspacesError = null
+        this.guestWorkspaceIds = new Set()
+        this.folders = null
+        this.foldersError = null
+        this.display()
+      }
+    ).open()
+  }
+}
