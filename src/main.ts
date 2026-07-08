@@ -119,6 +119,8 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
       data.audioMode = data.downloadAudio ? 'download' : 'off'
     }
     delete data.downloadAudio
+    // The removed inline 'embed' player falls back to link-only.
+    if (data.audioMode === 'embed') data.audioMode = 'off'
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data)
   }
 

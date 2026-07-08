@@ -37,9 +37,13 @@ class TokenModal extends Modal {
     const { contentEl } = this
     this.setTitle('Connect Carbon Voice')
     contentEl.createEl('p', {
-      text: 'Generate a Personal Access Token at developer.carbonvoice.app',
+      text: 'Generate a Personal Access Token in the Carbon Voice app:',
       cls: 'setting-item-description',
     })
+    const steps = contentEl.createEl('ol', { cls: 'setting-item-description' })
+    steps.createEl('li', { text: 'Open the Profile menu.' })
+    steps.createEl('li', { text: 'Select Integrations, then Integration Credentials.' })
+    steps.createEl('li', { text: 'Create a token and paste it below.' })
 
     new Setting(contentEl)
       .setName('API token')
@@ -242,11 +246,10 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Audio playback')
       .setDesc(
-        'Embed player: inline Carbon Voice player, no vault storage (private messages show their locked state). Download: save audio for offline playback (uses vault space). Off: link out only.'
+        'Download: save audio into the vault for offline playback (uses vault space). Off: link out to Carbon Voice only.'
       )
       .addDropdown(drop =>
         drop
-          .addOption('embed', 'Embed player')
           .addOption('download', 'Download for offline')
           .addOption('off', 'Off (link only)')
           .setValue(this.plugin.settings.audioMode)

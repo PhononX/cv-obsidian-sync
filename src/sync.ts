@@ -231,7 +231,7 @@ export class CarbonVoiceSync {
         : '> No transcript available yet.'
       body.push('## Transcript', readable, '')
     }
-    body.push(...this.audioBlock(m, memoUrl, audioPath))
+    body.push(...this.audioBlock(m, audioPath))
 
     body.push('## Metadata')
     if (link && creatorName) body.push(`- **From:** ${this.personLink(creatorName)}`)
@@ -344,7 +344,7 @@ export class CarbonVoiceSync {
           transcript ? formatTranscript(transcript, transcriptLanguage(m)) : '_[No transcript available]_',
           ''
         )
-        body.push(...this.audioBlock(m, url, audioPaths.get(m.message_id) ?? null))
+        body.push(...this.audioBlock(m, audioPaths.get(m.message_id) ?? null))
         body.push(`<sub><a href="${url}">Open in Carbon Voice ↗</a></sub>`, '', '---', '')
       }
     }
@@ -602,25 +602,11 @@ export class CarbonVoiceSync {
 
   // The audio player block for one message, per the active audio mode. Returns lines to splice
   // into the note body (empty for text messages, mode 'off', or a missing download).
-  private audioBlock(
-    m: CarbonVoiceMessage,
-    messageUrl: string,
-    downloadedPath: string | null
-  ): string[] {
+  private audioBlock(m: CarbonVoiceMessage, downloadedPath: string | null): string[] {
     if (m.is_text_message) return []
-    switch (this.settings.audioMode) {
-      case 'embed':
-        // The message URL is oEmbed-aware and renders the Carbon Voice player in an iframe;
-        // non-public messages show their own locked state, so no visibility check is needed.
-        return [
-          `<iframe src="${messageUrl}" width="100%" height="180" frameborder="0" allow="autoplay; encrypted-media" loading="lazy"></iframe>`,
-          '',
-        ]
-      case 'download':
-        return downloadedPath ? [`![[${downloadedPath}]]`, ''] : []
-      default:
-        return []
-    }
+    // Only 'download' renders a player; 'off' relies on the note's "Open in Carbon Voice" link.
+    if (this.settings.audioMode === 'download' && downloadedPath) return [`![[${downloadedPath}]]`, '']
+    return []
   }
 
   private async collectAudio(

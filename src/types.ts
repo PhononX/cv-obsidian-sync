@@ -1,11 +1,9 @@
 export type SyncScope = 'all' | 'by_workspace' | 'by_conversation' | 'by_folder'
 export type HistoryWindow = 7 | 30 | 90 | 365 | 'all'
 // How a message's audio is presented in a note:
-//  - 'embed'    → inline Carbon Voice player (iframe on the message URL, which is oEmbed-aware;
-//                 private messages surface their own locked state). No vault storage.
 //  - 'download' → save the audio into the vault and embed a native offline player.
 //  - 'off'      → no player; the note keeps its "Open in Carbon Voice" link.
-export type AudioMode = 'embed' | 'download' | 'off'
+export type AudioMode = 'download' | 'off'
 export type MessageType = 'channel' | 'prerecorded' | 'voicememo' | 'stored' | 'welcome'
 export type MessageKind = 'audio' | 'text' | 'attachment' | 'action-item' | 'ai-prompt' | 'ai-response' | 'channel-reminder'
 export type MessageDirection = 'older' | 'newer'
@@ -282,7 +280,7 @@ export const DEFAULT_SETTINGS: CarbonVoiceSettings = {
   syncInterval: 15,
   includeTranscripts: true,
   linkNotes: true,
-  audioMode: 'embed',
+  audioMode: 'off',
   syncOnStartup: true,
   lastSyncTimestamp: null,
 
