@@ -431,41 +431,56 @@ export function formatTranscript(text: string, languageCode?: string | null): st
       decimalIndex++
     }
 
-    // Split into sentences on language-specific punctuation.
-    const sentences = [...processedText.matchAll(config.punctuationRegex)].map(m => m[0])
-    if (sentences.length === 0) sentences.push(processedText)
-
     // Regex that fires when a sentence starts (or, for RTL, ends) with a transition word.
     const transitionWordsPattern = new RegExp(
       config.rightToLeft ? `(${transitionWords.join('|')})\\s*$` : `^(${transitionWords.join('|')})`,
       'i'
     )
 
-    // Group sentences into paragraphs.
+    // Honour paragraph breaks the transcript already carries (some transcripts — e.g. AI
+    // briefings — arrive pre-formatted) and group each block independently, so we never flatten
+    // an existing break.
+    const blocks = processedText.split(/\n[ \t]*\n+/).filter(b => b.trim().length > 0)
+
     const paragraphs: string[] = []
-    let currentParagraph: string[] = []
+    for (const block of blocks) {
+      // Split the block into sentences on language-specific punctuation. `matchAll` only yields
+      // text up to a closing `.!?…`, so capture whatever trails the last one separately —
+      // voice transcripts frequently don't end with punctuation, and dropping that remainder
+      // would silently lose the final utterance. (The app avoids this for audio via its
+      // time-code paragraph builder; we only have the transcript string, so we handle it here.)
+      const matches = [...block.matchAll(config.punctuationRegex)]
+      const sentences = matches.map(m => m[0])
+      const last = matches[matches.length - 1]
+      const consumedEnd = last ? (last.index ?? 0) + last[0].length : 0
+      const remainder = block.slice(consumedEnd).trim()
+      if (remainder) sentences.push(remainder)
+      if (sentences.length === 0) sentences.push(block)
 
-    for (let i = 0; i < sentences.length; i++) {
-      const sentence = sentences[i].trim()
+      // Group sentences into paragraphs.
+      let currentParagraph: string[] = []
+      for (let i = 0; i < sentences.length; i++) {
+        const sentence = sentences[i].trim()
 
-      const shouldStartNewParagraph =
-        transitionWordsPattern.test(sentence) ||
-        currentParagraph.length >= config.sentencesPerParagraph ||
-        (i > 0 &&
-          currentParagraph.length > 0 &&
-          Math.abs(sentence.length - currentParagraph[currentParagraph.length - 1].length) >
-            config.lengthDifferenceThreshold)
+        const shouldStartNewParagraph =
+          transitionWordsPattern.test(sentence) ||
+          currentParagraph.length >= config.sentencesPerParagraph ||
+          (i > 0 &&
+            currentParagraph.length > 0 &&
+            Math.abs(sentence.length - currentParagraph[currentParagraph.length - 1].length) >
+              config.lengthDifferenceThreshold)
 
-      if (shouldStartNewParagraph && currentParagraph.length > 0) {
-        paragraphs.push(currentParagraph.join(config.joinWithSpace ? ' ' : ''))
-        currentParagraph = []
+        if (shouldStartNewParagraph && currentParagraph.length > 0) {
+          paragraphs.push(currentParagraph.join(config.joinWithSpace ? ' ' : ''))
+          currentParagraph = []
+        }
+
+        currentParagraph.push(sentence)
       }
 
-      currentParagraph.push(sentence)
-    }
-
-    if (currentParagraph.length > 0) {
-      paragraphs.push(currentParagraph.join(config.joinWithSpace ? ' ' : ''))
+      if (currentParagraph.length > 0) {
+        paragraphs.push(currentParagraph.join(config.joinWithSpace ? ' ' : ''))
+      }
     }
 
     // Bidi markers for RTL languages (match the app's plain-text output):
