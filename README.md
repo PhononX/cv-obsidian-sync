@@ -1,10 +1,10 @@
 # Carbon Voice Sync
 
-Sync your [Carbon Voice](https://getcarbon.app) async voice conversations and
-voice memos into your Obsidian vault as Markdown notes.
+Sync your [Carbon Voice](https://getcarbon.app) conversations and voice memos
+into your Obsidian vault as Markdown notes.
 
-> **Desktop only.** This plugin talks to the Carbon Voice API over the network
-> and is not available on Obsidian Mobile.
+> **Desktop and mobile.** The plugin talks to the Carbon Voice API over the
+> network and runs on both Obsidian desktop and mobile.
 
 ## Use cases
 
@@ -43,11 +43,11 @@ voice memos into your Obsidian vault as Markdown notes.
     native player, so playback works offline (and for private audio).
   - _Off_ — no player, just the "Open in Carbon Voice" link.
 
-> **Status:** `0.1.0` is an early release. Account connection and all sync
-> configuration (scopes, folders, workspaces, history windows) are in place; the
-> background sync engine that writes notes into your vault is under active
-> development. Buttons that trigger a sync currently surface a "coming soon"
-> notice.
+> **Status:** `0.1.1` — an early but working release. Account connection, all
+> sync configuration (scopes, folders, workspaces, history windows), forward
+> sync, and historical import are functional. As an early release, the note
+> format and settings may still change between versions, so consider a test
+> vault or a backup if that matters to you.
 
 ## Installation
 
@@ -60,7 +60,8 @@ voice memos into your Obsidian vault as Markdown notes.
 ### Beta install via BRAT (available now)
 
 Before the plugin is listed in the community store, you can install and
-auto-update it with [BRAT](https://github.com/TfTHacker/obsidian42-brat):
+auto-update it with [BRAT](https://github.com/TfTHacker/obsidian42-brat) — this
+works on both desktop and mobile:
 
 1. Install the **BRAT** community plugin and enable it.
 2. In BRAT's settings, choose **Add Beta Plugin** and enter
@@ -69,11 +70,11 @@ auto-update it with [BRAT](https://github.com/TfTHacker/obsidian42-brat):
 
 ### Manual install
 
-1. Download `main.js` and `manifest.json` from the
+1. Download `main.js`, `manifest.json`, and `styles.css` from the
    [latest release](https://github.com/phononx/cv-obsidian-sync/releases).
 2. Create a folder named `carbon-voice-sync` in your vault's
    `.obsidian/plugins/` directory.
-3. Copy both files into that folder.
+3. Copy the three files into that folder.
 4. Reload Obsidian and enable **Carbon Voice Sync** under Community plugins.
 
 ## Setup
@@ -81,7 +82,7 @@ auto-update it with [BRAT](https://github.com/TfTHacker/obsidian42-brat):
 1. Generate a **Personal Access Token** in the Carbon Voice app: open the
    **Profile** menu, select **Integrations → Integration Credentials**, and
    create a token.
-2. In Obsidian, open **Settings → Carbon Voice Sync** and click **Add Token**.
+2. In Obsidian, open **Settings → Carbon Voice Sync** and click **Add token**.
 3. Paste your token and click **Connect**. Once validated, your account name and
    email appear at the top of the settings.
 4. Configure your **sync folder**, **interval**, and the **conversation** and
