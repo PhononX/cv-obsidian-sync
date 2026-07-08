@@ -164,9 +164,8 @@ export class CarbonVoiceSync {
       // Voice memos are authored by the connected account; link that person when we know them.
       const creatorName =
         m.creator_id === this.settings.connectedUserId ? this.settings.connectedUserName || '' : ''
-      if (this.settings.linkNotes) {
-        if (wsName) await this.ensureWorkspaceNote(wsName)
-        if (creatorName) await this.ensurePersonNote(creatorName)
+      if (this.settings.linkNotes && creatorName) {
+        await this.ensurePersonNote(creatorName)
       }
       const audioPath =
         this.settings.audioMode === 'download' ? await this.ensureAudio(api, m) : null
@@ -219,7 +218,7 @@ export class CarbonVoiceSync {
       `date: ${m.created_at.slice(0, 10)}`,
       `duration: ${durationSec}`,
     ]
-    if (link && wsName) fm.push(`workspace: ${yaml(this.workspaceLink(wsName))}`)
+    if (wsName) fm.push(`workspace_name: ${yaml(wsName)}`)
     if (link && creatorName) fm.push(`person: ${yaml(this.personLink(creatorName))}`)
     fm.push('tags: [carbon-voice, voice-memo]', '---', '')
 
@@ -235,7 +234,7 @@ export class CarbonVoiceSync {
 
     body.push('## Metadata')
     if (link && creatorName) body.push(`- **From:** ${this.personLink(creatorName)}`)
-    if (link && wsName) body.push(`- **Workspace:** ${this.workspaceLink(wsName)}`)
+    if (wsName) body.push(`- **Workspace:** ${wsName}`)
     body.push(
       `- **Date:** ${formatDateTime(m.created_at)}`,
       `- **Duration:** ${durationSec}s`,
@@ -314,7 +313,6 @@ export class CarbonVoiceSync {
       `workspace_name: ${yaml(wsName)}`,
       `workspace_id: ${channel.workspace_guid}`,
     ]
-    if (link && wsName) fm.push(`workspace: ${yaml(this.workspaceLink(wsName))}`)
     fm.push(
       `month: ${monthKey}`,
       `participants: [${participantsFm.map(yaml).join(', ')}]`,
@@ -547,13 +545,8 @@ export class CarbonVoiceSync {
   private personLink(name: string): string {
     return `[[${this.root()}/People/${sanitize(name)}|${name}]]`
   }
-  private workspaceLink(name: string): string {
-    return `[[${this.root()}/Workspaces/${sanitize(name)}|${name}]]`
-  }
 
   private async ensureEntityNotes(channel: CarbonVoiceChannel): Promise<void> {
-    const ws = channel.workspace_name?.trim()
-    if (ws) await this.ensureWorkspaceNote(ws)
     for (const c of channel.json_collaborators ?? []) {
       const name = `${c.first_name ?? ''} ${c.last_name ?? ''}`.trim() || c.user_guid
       await this.ensurePersonNote(name)
@@ -579,24 +572,6 @@ export class CarbonVoiceSync {
     )
   }
 
-  private async ensureWorkspaceNote(name: string): Promise<void> {
-    const path = `${this.root()}/Workspaces/${sanitize(name)}.md`
-    await this.createIfAbsent(
-      path,
-      [
-        '---',
-        `title: ${yaml(name)}`,
-        'tags: [carbon-voice, workspace]',
-        '---',
-        '',
-        `# ${name}`,
-        '',
-        '> Auto-created by Carbon Voice Sync. The backlinks pane lists every conversation and',
-        '> voice memo in this workspace.',
-        '',
-      ].join('\n')
-    )
-  }
 
   // ── Audio ─────────────────────────────────────────────────────────────────
 
