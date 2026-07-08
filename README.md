@@ -36,10 +36,12 @@ voice memos into your Obsidian vault as Markdown notes.
   are created once and never overwritten, so you can annotate them freely.
 - **AI summaries** — a voice memo's Carbon Voice summary is written into a `## Summary`
   section at the top of its note.
-- **Audio playback in your notes** — each message's audio can be downloaded into a
-  `Media` folder and embedded as a native player, so you can listen right next to the
-  transcript, offline. (Carbon Voice audio links are short-lived, so a local copy is what
-  makes durable playback possible.) Toggle it off if you'd rather keep the vault lean.
+- **Audio playback in your notes** — listen right next to the transcript. Choose how:
+  - _Embed player_ (default) — inline Carbon Voice player, nothing stored in your vault;
+    private messages show their own locked state.
+  - _Download for offline_ — save each message's audio into a `Media` folder and embed a
+    native player, so playback works offline (and for private audio).
+  - _Off_ — no player, just the "Open in Carbon Voice" link.
 
 > **Status:** `0.1.0` is an early release. Account connection and all sync
 > configuration (scopes, folders, workspaces, history windows) are in place; the

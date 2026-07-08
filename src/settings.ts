@@ -9,6 +9,7 @@ import type {
   WorkspaceType,
   WorkspaceRole,
   SyncScope,
+  AudioMode,
 } from './types'
 import { ASYNC_MEETING_PREFIX } from './types'
 
@@ -239,15 +240,18 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
       )
 
     new Setting(containerEl)
-      .setName('Download audio for playback')
+      .setName('Audio playback')
       .setDesc(
-        'Save each message’s audio into a Media folder and embed a player in the note. Enables offline playback but uses vault space.'
+        'Embed player: inline Carbon Voice player, no vault storage (private messages show their locked state). Download: save audio for offline playback (uses vault space). Off: link out only.'
       )
-      .addToggle(toggle =>
-        toggle
-          .setValue(this.plugin.settings.downloadAudio)
+      .addDropdown(drop =>
+        drop
+          .addOption('embed', 'Embed player')
+          .addOption('download', 'Download for offline')
+          .addOption('off', 'Off (link only)')
+          .setValue(this.plugin.settings.audioMode)
           .onChange(async value => {
-            this.plugin.settings.downloadAudio = value
+            this.plugin.settings.audioMode = value as AudioMode
             await this.plugin.saveSettings()
           })
       )

@@ -167,7 +167,8 @@ export class CarbonVoiceSync {
         if (wsName) await this.ensureWorkspaceNote(wsName)
         if (creatorName) await this.ensurePersonNote(creatorName)
       }
-      const audioPath = this.settings.downloadAudio ? await this.ensureAudio(api, m) : null
+      const audioPath =
+        this.settings.audioMode === 'download' ? await this.ensureAudio(api, m) : null
       const path = `${this.root()}/Voice Memos/${subpath}/${sanitize(title)}.md`
       await this.upsertFile(
         path,
@@ -226,7 +227,7 @@ export class CarbonVoiceSync {
     if (this.settings.includeTranscripts) {
       body.push('## Transcript', transcript || '> No transcript available yet.', '')
     }
-    if (audioPath) body.push(`![[${audioPath}]]`, '')
+    body.push(...this.audioBlock(m, memoUrl, audioPath))
 
     body.push('## Metadata')
     if (link && creatorName) body.push(`- **From:** ${this.personLink(creatorName)}`)
@@ -273,9 +274,10 @@ export class CarbonVoiceSync {
         )
         if (msgs.length === 0) continue
         msgs.sort((a, b) => a.created_at.localeCompare(b.created_at))
-        const audioPaths = this.settings.downloadAudio
-          ? await this.collectAudio(api, msgs)
-          : new Map<string, string>()
+        const audioPaths =
+          this.settings.audioMode === 'download'
+            ? await this.collectAudio(api, msgs)
+            : new Map<string, string>()
         const path = `${this.root()}/Conversations/${sanitize(workspaceName(channel))}/${sanitize(channelName(channel))}/${month} Messages.md`
         await this.upsertFile(path, this.buildConversationNote(channel, month, msgs, audioPaths))
         count++
@@ -334,8 +336,7 @@ export class CarbonVoiceSync {
         ]
         if (!isText) parts.push(`${Math.round((m.duration_ms ?? 0) / 1000)}s`)
         body.push(`### ${parts.join(' · ')}`, transcript || '_[No transcript available]_', '')
-        const audioPath = audioPaths.get(m.message_id)
-        if (audioPath) body.push(`![[${audioPath}]]`, '')
+        body.push(...this.audioBlock(m, url, audioPaths.get(m.message_id) ?? null))
         body.push(`<sub><a href="${url}">Open in Carbon Voice ↗</a></sub>`, '', '---', '')
       }
     }
@@ -590,6 +591,29 @@ export class CarbonVoiceSync {
   }
 
   // ── Audio ─────────────────────────────────────────────────────────────────
+
+  // The audio player block for one message, per the active audio mode. Returns lines to splice
+  // into the note body (empty for text messages, mode 'off', or a missing download).
+  private audioBlock(
+    m: CarbonVoiceMessage,
+    messageUrl: string,
+    downloadedPath: string | null
+  ): string[] {
+    if (m.is_text_message) return []
+    switch (this.settings.audioMode) {
+      case 'embed':
+        // The message URL is oEmbed-aware and renders the Carbon Voice player in an iframe;
+        // non-public messages show their own locked state, so no visibility check is needed.
+        return [
+          `<iframe src="${messageUrl}" width="100%" height="180" frameborder="0" allow="autoplay; encrypted-media" loading="lazy"></iframe>`,
+          '',
+        ]
+      case 'download':
+        return downloadedPath ? [`![[${downloadedPath}]]`, ''] : []
+      default:
+        return []
+    }
+  }
 
   private async collectAudio(
     api: CarbonVoiceAPI,
