@@ -44,11 +44,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          # Attach the built bundle and the manifest as individual, top-level
-          # assets. Obsidian downloads these by name, so they must not be zipped
-          # or nested. styles.css is omitted because this plugin ships none.
+          # Attach the built bundle, manifest, and stylesheet as individual,
+          # top-level assets. Obsidian downloads these by name, so they must not
+          # be zipped or nested.
           gh release create "$tag" \
             --title "$tag" \
             --draft \
             --generate-notes \
-            main.js manifest.json
+            main.js manifest.json styles.css
