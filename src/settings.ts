@@ -283,12 +283,6 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
       this.renderConversationSelector(containerEl)
     }
 
-    this.renderImportHistory(containerEl, {
-      noun: 'conversation',
-      category: 'conversation',
-      windowKey: 'conversationHistoryWindow',
-    })
-
     // ── Voice memo scope ────────────────────────────────────────────────────
 
     containerEl.createEl('h2', { text: 'Voice memo scope' })
@@ -315,46 +309,50 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
       this.renderFolderSelector(containerEl)
     }
 
-    this.renderImportHistory(containerEl, {
-      noun: 'voice memo',
-      category: 'voicememo',
-      windowKey: 'voiceMemoHistoryWindow',
-    })
-  }
+    // ── Historical import ────────────────────────────────────────────────────
 
-  // Per-category historical import: forward sync only pulls new activity, so this lets the
-  // user pull older data for one category, honouring that category's scope above.
-  private renderImportHistory(
-    containerEl: HTMLElement,
-    opts: {
-      noun: string
-      category: 'conversation' | 'voicememo'
-      windowKey: 'conversationHistoryWindow' | 'voiceMemoHistoryWindow'
-    }
-  ): void {
+    containerEl.createEl('h2', { text: 'Historical import' })
+    containerEl.createEl('p', {
+      text: 'Forward sync only pulls new activity. Import older data once — both categories are fetched together in a single pass, each using its own window and honouring its scope above.',
+      cls: 'setting-item-description',
+    })
+
+    this.renderHistoryWindow(containerEl, 'Conversation history', 'conversationHistoryWindow')
+    this.renderHistoryWindow(containerEl, 'Voice memo history', 'voiceMemoHistoryWindow')
+
     new Setting(containerEl)
-      .setName('Import history')
-      .setDesc(`Pull past ${opts.noun}s into your vault (respects the scope above)`)
-      .addDropdown(drop =>
-        drop
-          .addOption('7', 'Last 7 days')
-          .addOption('30', 'Last 30 days')
-          .addOption('90', 'Last 90 days')
-          .addOption('365', 'Last year')
-          .addOption('all', 'All time')
-          .setValue(String(this.plugin.settings[opts.windowKey]))
-          .onChange(async value => {
-            this.plugin.settings[opts.windowKey] =
-              value === 'all' ? 'all' : (parseInt(value) as 7 | 30 | 90 | 365)
-            await this.plugin.saveSettings()
+      .setName('Import now')
+      .setDesc('Fetch and write both categories for the windows above')
+      .addButton(btn =>
+        btn
+          .setButtonText('Import')
+          .setCta()
+          .onClick(async () => {
+            await this.plugin.runImport()
+            this.display()
           })
       )
-      .addButton(btn =>
-        btn.setButtonText('Import').onClick(async () => {
-          await this.plugin.runImport(opts.category, this.plugin.settings[opts.windowKey])
-          this.display()
+  }
+
+  private renderHistoryWindow(
+    containerEl: HTMLElement,
+    name: string,
+    windowKey: 'conversationHistoryWindow' | 'voiceMemoHistoryWindow'
+  ): void {
+    new Setting(containerEl).setName(name).addDropdown(drop =>
+      drop
+        .addOption('7', 'Last 7 days')
+        .addOption('30', 'Last 30 days')
+        .addOption('90', 'Last 90 days')
+        .addOption('365', 'Last year')
+        .addOption('all', 'All time')
+        .setValue(String(this.plugin.settings[windowKey]))
+        .onChange(async value => {
+          this.plugin.settings[windowKey] =
+            value === 'all' ? 'all' : (parseInt(value) as 7 | 30 | 90 | 365)
+          await this.plugin.saveSettings()
         })
-      )
+    )
   }
 
   private channelName(c: CarbonVoiceChannel): string {

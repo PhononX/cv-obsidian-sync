@@ -1,5 +1,5 @@
 import { Notice, Plugin } from 'obsidian'
-import { CarbonVoiceSettings, DEFAULT_SETTINGS, HistoryWindow } from './types'
+import { CarbonVoiceSettings, DEFAULT_SETTINGS } from './types'
 import { CarbonVoiceSettingTab } from './settings'
 import { CarbonVoiceSync } from './sync'
 
@@ -67,7 +67,7 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
   }
 
   // Explicit per-category historical import triggered from settings.
-  async runImport(category: 'conversation' | 'voicememo', window: HistoryWindow): Promise<void> {
+  async runImport(): Promise<void> {
     if (this.isSyncing) {
       new Notice('Carbon Voice: A sync is already running')
       return
@@ -77,14 +77,16 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
       return
     }
     this.isSyncing = true
-    const label = category === 'voicememo' ? 'voice memo' : 'conversation'
-    const notice = new Notice(`Carbon Voice: Importing ${label} history, this may take a moment…`, 0)
+    const notice = new Notice('Carbon Voice: Importing history, this may take a moment…', 0)
     try {
-      const res = await this.sync.importHistory(category, window)
+      const res = await this.sync.importHistory(
+        this.settings.conversationHistoryWindow,
+        this.settings.voiceMemoHistoryWindow
+      )
       notice.hide()
-      const written = category === 'voicememo' ? res.voiceMemos : res.conversations
-      const unit = category === 'voicememo' ? 'voice memo(s)' : 'conversation file(s)'
-      new Notice(`Carbon Voice: Imported ${written} ${unit}`)
+      new Notice(
+        `Carbon Voice: Imported ${res.conversations} conversation file(s), ${res.voiceMemos} voice memo(s)`
+      )
     } catch (err) {
       notice.hide()
       new Notice(`Carbon Voice: Import failed — ${errMessage(err)}`)

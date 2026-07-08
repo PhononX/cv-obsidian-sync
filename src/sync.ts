@@ -57,25 +57,30 @@ export class CarbonVoiceSync {
     return { firstRun: false, conversations, voiceMemos }
   }
 
-  // Explicit historical pull for one category over a time window. Does not touch the
-  // incremental baseline (lastSyncTimestamp) — it is purely additive.
+  // Explicit historical pull for BOTH categories in a single fetch — the recents endpoint
+  // returns everything, so fetching once and splitting avoids re-pulling and dropping messages.
+  // Each category is filtered to its own window. Does not touch the incremental baseline.
   async importHistory(
-    category: 'conversation' | 'voicememo',
-    window: HistoryWindow
+    conversationWindow: HistoryWindow,
+    voiceMemoWindow: HistoryWindow
   ): Promise<SyncResult> {
     const api = new CarbonVoiceAPI(this.settings.apiToken)
-    const since = this.windowToSince(window)
-    const messages = await this.collectMessagesSince(api, since)
+    const convSince = this.windowToSince(conversationWindow)
+    const memoSince = this.windowToSince(voiceMemoWindow)
+    // Fetch once over the larger of the two windows, then filter each category by its own.
+    const earliest = convSince < memoSince ? convSince : memoSince
+    const messages = await this.collectMessagesSince(api, earliest)
 
-    if (category === 'voicememo') {
-      const memos = messages.filter(m => this.isVoiceMemo(m) && this.memoInScope(m))
-      const voiceMemos = await this.processVoiceMemos(api, memos)
-      return { firstRun: false, conversations: 0, voiceMemos }
-    }
+    const memoMsgs = messages.filter(
+      m => m.created_at >= memoSince && this.isVoiceMemo(m) && this.memoInScope(m)
+    )
+    const voiceMemos = await this.processVoiceMemos(api, memoMsgs)
 
-    const convMsgs = await this.selectConversationMessages(api, messages)
+    const convCandidates = messages.filter(m => m.created_at >= convSince)
+    const convMsgs = await this.selectConversationMessages(api, convCandidates)
     const conversations = await this.processConversations(api, convMsgs)
-    return { firstRun: false, conversations, voiceMemos: 0 }
+
+    return { firstRun: false, conversations, voiceMemos }
   }
 
   // ── Message fetching ────────────────────────────────────────────────────
@@ -166,13 +171,16 @@ export class CarbonVoiceSync {
     folders: Map<string, CarbonVoiceFolder>,
     workspaces: Map<string, string>
   ): string {
+    // Workspace-first so identical folder names in different workspaces never collide.
+    const ws = m.workspace_ids[0]
+    const wsName = sanitize((ws && workspaces.get(ws)) || 'Unfiled')
     if (m.folder_id && folders.has(m.folder_id)) {
       const f = folders.get(m.folder_id)!
       const names = [...(f.path ?? [])].reverse().map(id => folders.get(id)?.name ?? '…')
-      return [...names, f.name].map(sanitize).join('/')
+      const folderPath = [...names, f.name].map(sanitize).join('/')
+      return `${wsName}/${folderPath}`
     }
-    const ws = m.workspace_ids[0]
-    return sanitize((ws && workspaces.get(ws)) || 'Unfiled')
+    return wsName
   }
 
   private buildVoiceMemoNote(
@@ -263,6 +271,8 @@ export class CarbonVoiceSync {
       `cv_conversation_id: ${channel.channel_guid}`,
       `conversation_link: https://carbonvoice.app/c/${channel.channel_guid}`,
       `conversation_name: ${yaml(title)}`,
+      `workspace_name: ${yaml(channel.workspace_name ?? '')}`,
+      `workspace_id: ${channel.workspace_guid}`,
       `month: ${monthKey}`,
       `participants: [${participants.map(yaml).join(', ')}]`,
       'tags: [carbon-voice]',
@@ -289,7 +299,7 @@ export class CarbonVoiceSync {
           `### ${parts.join(' · ')}`,
           transcript || '_[No transcript available]_',
           '',
-          `<sub>[Open in Carbon Voice ↗](${url})</sub>`,
+          `<sub><a href="${url}">Open in Carbon Voice ↗</a></sub>`,
           '',
           '---',
           ''
@@ -523,11 +533,9 @@ function memoTitle(
   summary: string | null,
   transcript: string | null
 ): string {
-  const named = m.name?.trim()
-  if (named) return named
-  if (summary) return truncateTitle(summary)
-  if (transcript) return truncateTitle(transcript)
-  return `${m.created_at.slice(0, 10)} Voice Memo`
+  const date = m.created_at.slice(0, 10)
+  const label = m.name?.trim() || summary || transcript || 'Voice Memo'
+  return `${date}: ${truncateTitle(label)}`
 }
 
 function truncateTitle(text: string, max = 72): string {
