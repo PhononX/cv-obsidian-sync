@@ -51,11 +51,12 @@ into your Obsidian vault as Markdown notes.
 
 ## Installation
 
-### From the Community Plugins browser (once listed)
+### From the Community Plugins browser (coming soon)
 
-1. Open **Settings → Community plugins → Browse**.
-2. Search for **Carbon Voice Sync**.
-3. Click **Install**, then **Enable**.
+> **Not yet available.** Carbon Voice Sync has not been listed in the Obsidian
+> community store yet, so it will not appear under **Browse**. Until it is,
+> install it with BRAT (below). Once listed, this will be: **Settings →
+> Community plugins → Browse → search "Carbon Voice Sync" → Install → Enable**.
 
 ### Beta install via BRAT (available now)
 
