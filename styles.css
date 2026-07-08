@@ -1,0 +1,139 @@
+/* Carbon Voice Sync — settings & modal UI.
+   Colours use Obsidian theme variables so the plugin matches light/dark themes. */
+
+/* ── Connect modal ───────────────────────────────────────────────────────── */
+.cv-token-input {
+  width: 100%;
+}
+
+.cv-connect-status {
+  margin: 0 0 0.75rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.875rem;
+}
+
+.cv-connect-status.mod-error {
+  background: var(--background-modifier-error);
+  color: var(--text-error);
+}
+
+.cv-hidden {
+  display: none;
+}
+
+/* ── Dual list-box selector ──────────────────────────────────────────────── */
+.cv-duallist {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 8px 0 16px;
+}
+
+.cv-duallist__pane {
+  flex: 1;
+  min-width: 240px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.cv-duallist__header {
+  font-weight: 600;
+  font-size: 0.85em;
+}
+
+.cv-duallist__filter {
+  width: 100%;
+  margin-top: 6px;
+  box-sizing: border-box;
+}
+
+.cv-duallist__list {
+  max-height: 220px;
+  overflow-y: auto;
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cv-duallist__section {
+  padding: 6px 8px 2px;
+  font-size: 0.72em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.cv-duallist__section.is-divided {
+  border-top: 1px solid var(--background-modifier-border);
+  margin-top: 4px;
+}
+
+.cv-duallist__row {
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cv-duallist__row:hover {
+  background: var(--background-modifier-hover);
+}
+
+.cv-duallist__row-label {
+  font-size: 0.9em;
+}
+
+.cv-duallist__row-sublabel {
+  font-size: 0.78em;
+  color: var(--text-muted);
+}
+
+.cv-duallist__icon {
+  color: var(--text-muted);
+  font-size: 1.1em;
+}
+
+.cv-duallist__muted {
+  padding: 6px 8px;
+  font-size: 0.82em;
+  color: var(--text-muted);
+}
+
+.cv-duallist__more {
+  padding: 6px 8px;
+  margin-top: 2px;
+  text-align: center;
+  font-size: 0.82em;
+  color: var(--text-accent);
+  cursor: pointer;
+}
+
+/* ── Connected-account name row ──────────────────────────────────────────── */
+.cv-account-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  margin-right: 7px;
+  vertical-align: middle;
+  object-fit: cover;
+}
+
+.cv-account-email {
+  color: var(--text-muted);
+}
+
+.cv-account-email.mod-has-more {
+  cursor: help;
+  text-decoration: underline dotted var(--text-muted);
+}
+
+.cv-desc-error {
+  color: var(--text-error);
+}

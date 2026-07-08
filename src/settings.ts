@@ -34,7 +34,7 @@ class TokenModal extends Modal {
 
   onOpen() {
     const { contentEl } = this
-    contentEl.createEl('h3', { text: 'Connect Carbon Voice' })
+    this.setTitle('Connect Carbon Voice')
     contentEl.createEl('p', {
       text: 'Generate a Personal Access Token at developer.carbonvoice.app',
       cls: 'setting-item-description',
@@ -48,15 +48,13 @@ class TokenModal extends Modal {
           .setValue(this.token)
           .onChange(value => {
             this.token = value.trim()
-            if (this.statusEl) this.statusEl.style.display = 'none'
+            this.statusEl?.addClass('cv-hidden')
           })
         text.inputEl.type = 'password'
-        text.inputEl.style.width = '100%'
+        text.inputEl.addClass('cv-token-input')
       })
 
-    this.statusEl = contentEl.createDiv()
-    this.statusEl.style.cssText =
-      'display:none; margin:0 0 0.75rem; padding:0.4rem 0.6rem; border-radius:4px; font-size:0.875rem;'
+    this.statusEl = contentEl.createDiv({ cls: 'cv-connect-status cv-hidden' })
 
     new Setting(contentEl)
       .addButton(btn =>
@@ -67,7 +65,7 @@ class TokenModal extends Modal {
             if (!this.token) return
             btn.setButtonText('Connecting…')
             btn.setDisabled(true)
-            if (this.statusEl) this.statusEl.style.display = 'none'
+            this.statusEl?.addClass('cv-hidden')
 
             try {
               const api = new CarbonVoiceAPI(this.token)
@@ -77,9 +75,8 @@ class TokenModal extends Modal {
             } catch (err) {
               const msg = err instanceof Error ? err.message : 'Unknown error'
               if (this.statusEl) {
-                this.statusEl.style.display = 'block'
-                this.statusEl.style.background = '#f8d7da'
-                this.statusEl.style.color = '#721c24'
+                this.statusEl.removeClass('cv-hidden')
+                this.statusEl.addClass('mod-error')
                 this.statusEl.setText(`✗ ${msg}`)
               }
               btn.setButtonText('Connect')
@@ -135,7 +132,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
 
     // ── Synced Account ───────────────────────────────────────────────────────
 
-    containerEl.createEl('h2', { text: 'Synced Account' })
+    new Setting(containerEl).setName('Synced account').setHeading()
 
     const {
       apiToken,
@@ -152,7 +149,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
         .setDesc('Add a token to connect your Carbon Voice account')
         .addButton(btn =>
           btn
-            .setButtonText('Add Token')
+            .setButtonText('Add token')
             .setCta()
             .onClick(() => this.openTokenModal())
         )
@@ -167,7 +164,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
       const accountSetting = new Setting(containerEl)
         .setDesc(validatedDesc)
         .addButton(btn =>
-          btn.setButtonText('Change Token').onClick(() => this.openTokenModal())
+          btn.setButtonText('Change token').onClick(() => this.openTokenModal())
         )
 
       this.buildAccountNameEl(
@@ -182,7 +179,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
 
     // ── Sync ────────────────────────────────────────────────────────────────
 
-    containerEl.createEl('h2', { text: 'Sync' })
+    new Setting(containerEl).setName('Sync').setHeading()
 
     new Setting(containerEl)
       .setName('Sync folder')
@@ -259,7 +256,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
 
     // ── Conversation scope ──────────────────────────────────────────────────
 
-    containerEl.createEl('h2', { text: 'Conversation scope' })
+    new Setting(containerEl).setName('Conversation scope').setHeading()
 
     new Setting(containerEl)
       .setName('Scope')
@@ -285,7 +282,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
 
     // ── Voice memo scope ────────────────────────────────────────────────────
 
-    containerEl.createEl('h2', { text: 'Voice memo scope' })
+    new Setting(containerEl).setName('Voice memo scope').setHeading()
 
     new Setting(containerEl)
       .setName('Scope')
@@ -311,7 +308,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
 
     // ── Historical import ────────────────────────────────────────────────────
 
-    containerEl.createEl('h2', { text: 'Historical import' })
+    new Setting(containerEl).setName('Historical import').setHeading()
     containerEl.createEl('p', {
       text: 'Forward sync only pulls new activity. Import older data once — both categories are fetched together in a single pass, each using its own window and honouring its scope above.',
       cls: 'setting-item-description',
@@ -516,41 +513,27 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
     const items = opts.items
     let filterText = opts.filter
 
-    const wrap = containerEl.createDiv()
-    wrap.style.cssText =
-      'display:flex; gap:12px; flex-wrap:wrap; margin:8px 0 16px;'
-
-    const paneStyle =
-      'flex:1; min-width:240px; border:1px solid var(--background-modifier-border); border-radius:6px; padding:8px;'
-    const listStyle =
-      'max-height:220px; overflow-y:auto; margin-top:6px; display:flex; flex-direction:column; gap:2px;'
-    const headerStyle = 'font-weight:600; font-size:0.85em;'
+    const wrap = containerEl.createDiv({ cls: 'cv-duallist' })
 
     // ── Left pane: available ──
-    const left = wrap.createDiv()
-    left.style.cssText = paneStyle
-    const leftHeader = left.createDiv()
-    leftHeader.style.cssText = headerStyle
-    const filterInput = left.createEl('input', { type: 'text' })
+    const left = wrap.createDiv({ cls: 'cv-duallist__pane' })
+    const leftHeader = left.createDiv({ cls: 'cv-duallist__header' })
+    const filterInput = left.createEl('input', {
+      type: 'text',
+      cls: 'cv-duallist__filter',
+    })
     filterInput.placeholder = `Filter ${opts.noun}s…`
     filterInput.value = filterText
-    filterInput.style.cssText = 'width:100%; margin-top:6px; box-sizing:border-box;'
-    const leftList = left.createDiv()
-    leftList.style.cssText = listStyle
+    const leftList = left.createDiv({ cls: 'cv-duallist__list' })
 
     // ── Right pane: selected ──
-    const right = wrap.createDiv()
-    right.style.cssText = paneStyle
-    const rightHeader = right.createDiv()
-    rightHeader.style.cssText = headerStyle
-    const rightList = right.createDiv()
-    rightList.style.cssText = listStyle
+    const right = wrap.createDiv({ cls: 'cv-duallist__pane' })
+    const rightHeader = right.createDiv({ cls: 'cv-duallist__header' })
+    const rightList = right.createDiv({ cls: 'cv-duallist__list' })
 
     const makeSectionHeader = (listEl: HTMLElement, title: string, isFirst: boolean) => {
-      const h = listEl.createDiv({ text: title })
-      h.style.cssText =
-        'padding:6px 8px 2px; font-size:0.72em; font-weight:600; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-muted);' +
-        (isFirst ? '' : ' border-top:1px solid var(--background-modifier-border); margin-top:4px;')
+      const h = listEl.createDiv({ cls: 'cv-duallist__section', text: title })
+      if (!isFirst) h.addClass('is-divided')
     }
 
     const makeRow = (
@@ -558,19 +541,13 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
       item: { id: string; label: string; sublabel: string; section?: string },
       side: 'available' | 'selected'
     ) => {
-      const row = listEl.createDiv()
-      row.style.cssText =
-        'padding:4px 8px; border-radius:4px; cursor:pointer; display:flex; align-items:center; justify-content:space-between; gap:8px;'
+      const row = listEl.createDiv({ cls: 'cv-duallist__row' })
       const text = row.createDiv()
-      text.createDiv({ text: item.label }).style.cssText = 'font-size:0.9em;'
+      text.createDiv({ cls: 'cv-duallist__row-label', text: item.label })
       if (item.sublabel) {
-        text.createDiv({ text: item.sublabel }).style.cssText =
-          'font-size:0.78em; color:var(--text-muted);'
+        text.createDiv({ cls: 'cv-duallist__row-sublabel', text: item.sublabel })
       }
-      const icon = row.createSpan({ text: side === 'available' ? '+' : '×' })
-      icon.style.cssText = 'color:var(--text-muted); font-size:1.1em;'
-      row.onmouseenter = () => (row.style.background = 'var(--background-modifier-hover)')
-      row.onmouseleave = () => (row.style.background = '')
+      row.createSpan({ cls: 'cv-duallist__icon', text: side === 'available' ? '+' : '×' })
       row.onclick = async () => {
         if (side === 'available') await opts.onAdd(item.id)
         else await opts.onRemove(item.id)
@@ -579,8 +556,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
     }
 
     const muted = (listEl: HTMLElement, text: string) => {
-      const el = listEl.createDiv({ text })
-      el.style.cssText = 'padding:6px 8px; font-size:0.82em; color:var(--text-muted);'
+      listEl.createDiv({ cls: 'cv-duallist__muted', text })
     }
 
     const renderPanes = () => {
@@ -625,10 +601,9 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
       }
       if (opts.hasMore) {
         const more = leftList.createDiv({
+          cls: 'cv-duallist__more',
           text: opts.loading ? 'Loading…' : `Load more (filters loaded items only)`,
         })
-        more.style.cssText =
-          'padding:6px 8px; margin-top:2px; text-align:center; font-size:0.82em; color:var(--text-accent); cursor:pointer;'
         more.onclick = () => {
           more.setText('Loading…')
           opts.onLoad()
@@ -923,21 +898,20 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
     nameEl.empty()
 
     if (avatarUrl) {
-      const img = nameEl.createEl('img')
+      const img = nameEl.createEl('img', { cls: 'cv-account-avatar' })
       img.src = avatarUrl
-      img.style.cssText =
-        'width:22px; height:22px; border-radius:50%; margin-right:7px; vertical-align:middle; object-fit:cover;'
     }
 
     nameEl.appendText(name)
 
     if (emails.length > 0) {
-      const emailSpan = nameEl.createEl('span', { text: ` · ${emails[0]}` })
-      emailSpan.style.color = 'var(--text-muted)'
+      const emailSpan = nameEl.createEl('span', {
+        cls: 'cv-account-email',
+        text: ` · ${emails[0]}`,
+      })
       if (emails.length > 1) {
         emailSpan.title = emails.slice(1).join('\n')
-        emailSpan.style.cssText +=
-          '; cursor: help; text-decoration: underline dotted var(--text-muted);'
+        emailSpan.addClass('mod-has-more')
       }
     }
   }
@@ -957,14 +931,14 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
       this.plugin.settings.lastTokenValidated = new Date().toISOString()
       await this.plugin.saveSettings()
 
-      descEl.style.color = ''
+      descEl.removeClass('cv-desc-error')
       descEl.setText(`User ID: ${user.user_guid} · Token last validated ${new Date().toLocaleString()}`)
 
       this.buildAccountNameEl(nameEl, `${user.first_name} ${user.last_name}`.trim(), emails, avatarUrl)
     } catch {
       const last = this.plugin.settings.lastTokenValidated
       const lastStr = last ? ` · Last validated ${new Date(last).toLocaleString()}` : ''
-      descEl.style.color = 'var(--text-error)'
+      descEl.addClass('cv-desc-error')
       descEl.setText(`Token validation failed${lastStr}`)
     }
   }
