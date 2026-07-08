@@ -78,8 +78,9 @@ auto-update it with [BRAT](https://github.com/TfTHacker/obsidian42-brat):
 
 ## Setup
 
-1. Generate a **Personal Access Token** at
-   [developer.carbonvoice.app](https://developer.carbonvoice.app).
+1. Generate a **Personal Access Token** in the Carbon Voice app: open the
+   **Profile** menu, select **Integrations → Integration Credentials**, and
+   create a token.
 2. In Obsidian, open **Settings → Carbon Voice Sync** and click **Add Token**.
 3. Paste your token and click **Connect**. Once validated, your account name and
    email appear at the top of the settings.
