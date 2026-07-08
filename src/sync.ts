@@ -159,8 +159,21 @@ export class CarbonVoiceSync {
       const summary = extractText(m, 'summary')
       const subpath = this.memoSubpath(m, folders, workspaces)
       const title = memoTitle(m, summary, transcript)
+      const wsName = (m.workspace_ids[0] && workspaces.get(m.workspace_ids[0])) || ''
+      // Voice memos are authored by the connected account; link that person when we know them.
+      const creatorName =
+        m.creator_id === this.settings.connectedUserId ? this.settings.connectedUserName || '' : ''
+      if (this.settings.linkNotes) {
+        if (wsName) await this.ensureWorkspaceNote(wsName)
+        if (creatorName) await this.ensurePersonNote(creatorName)
+      }
+      const audioPath =
+        this.settings.audioMode === 'download' ? await this.ensureAudio(api, m) : null
       const path = `${this.root()}/Voice Memos/${subpath}/${sanitize(title)}.md`
-      await this.upsertFile(path, this.buildVoiceMemoNote(m, subpath, title, transcript))
+      await this.upsertFile(
+        path,
+        this.buildVoiceMemoNote(m, subpath, title, transcript, summary, wsName, creatorName, audioPath)
+      )
       count++
     }
     return count
@@ -187,29 +200,43 @@ export class CarbonVoiceSync {
     m: CarbonVoiceMessage,
     subpath: string,
     title: string,
-    transcript: string | null
+    transcript: string | null,
+    summary: string | null,
+    wsName: string,
+    creatorName: string,
+    audioPath: string | null
   ): string {
+    const link = this.settings.linkNotes
     const durationSec = Math.round((m.duration_ms ?? 0) / 1000)
+    const memoUrl = `https://carbonvoice.app/m/${m.message_id}`
     const fm = [
       '---',
       `cv_memo_id: ${m.message_id}`,
+      `memo_link: ${memoUrl}`,
       `cv_folder: ${yaml(subpath)}`,
       `title: ${yaml(title)}`,
       `date: ${m.created_at.slice(0, 10)}`,
       `duration: ${durationSec}`,
-      'tags: [carbon-voice, voice-memo]',
-      '---',
-      '',
     ]
+    if (link && wsName) fm.push(`workspace: ${yaml(this.workspaceLink(wsName))}`)
+    if (link && creatorName) fm.push(`person: ${yaml(this.personLink(creatorName))}`)
+    fm.push('tags: [carbon-voice, voice-memo]', '---', '')
+
     const body: string[] = [`# ${title}`, '']
+    if (summary) body.push('## Summary', summary, '')
     if (this.settings.includeTranscripts) {
       body.push('## Transcript', transcript || '> No transcript available yet.', '')
     }
+    body.push(...this.audioBlock(m, memoUrl, audioPath))
+
+    body.push('## Metadata')
+    if (link && creatorName) body.push(`- **From:** ${this.personLink(creatorName)}`)
+    if (link && wsName) body.push(`- **Workspace:** ${this.workspaceLink(wsName)}`)
     body.push(
-      '## Metadata',
       `- **Date:** ${formatDateTime(m.created_at)}`,
       `- **Duration:** ${durationSec}s`,
       `- **Synced:** ${formatDateTime(new Date().toISOString())}`,
+      `- [Open in Carbon Voice ↗](${memoUrl})`,
       ''
     )
     return fm.concat(body).join('\n')
@@ -240,14 +267,19 @@ export class CarbonVoiceSync {
         channel = await api.getChannel(ch)
         channelCache.set(ch, channel)
       }
+      if (this.settings.linkNotes) await this.ensureEntityNotes(channel)
       for (const month of months) {
         const msgs = (await this.fetchChannelMonth(api, ch, month)).filter(
           m => !m.deleted_at && !isPending(m)
         )
         if (msgs.length === 0) continue
         msgs.sort((a, b) => a.created_at.localeCompare(b.created_at))
+        const audioPaths =
+          this.settings.audioMode === 'download'
+            ? await this.collectAudio(api, msgs)
+            : new Map<string, string>()
         const path = `${this.root()}/Conversations/${sanitize(workspaceName(channel))}/${sanitize(channelName(channel))}/${month} Messages.md`
-        await this.upsertFile(path, this.buildConversationNote(channel, month, msgs))
+        await this.upsertFile(path, this.buildConversationNote(channel, month, msgs, audioPaths))
         count++
       }
     }
@@ -257,34 +289,42 @@ export class CarbonVoiceSync {
   private buildConversationNote(
     channel: CarbonVoiceChannel,
     monthKey: string,
-    messages: CarbonVoiceMessage[]
+    messages: CarbonVoiceMessage[],
+    audioPaths: Map<string, string>
   ): string {
+    const link = this.settings.linkNotes
     const nameById = new Map<string, string>()
     for (const c of channel.json_collaborators ?? []) {
       nameById.set(c.user_guid, `${c.first_name ?? ''} ${c.last_name ?? ''}`.trim() || c.user_guid)
     }
     const participants = [...nameById.values()]
     const title = channelName(channel)
+    const wsName = channel.workspace_name ?? ''
+    const participantsFm = participants.map(p => (link ? this.personLink(p) : p))
 
     const fm = [
       '---',
       `cv_conversation_id: ${channel.channel_guid}`,
       `conversation_link: https://carbonvoice.app/c/${channel.channel_guid}`,
       `conversation_name: ${yaml(title)}`,
-      `workspace_name: ${yaml(channel.workspace_name ?? '')}`,
+      `workspace_name: ${yaml(wsName)}`,
       `workspace_id: ${channel.workspace_guid}`,
+    ]
+    if (link && wsName) fm.push(`workspace: ${yaml(this.workspaceLink(wsName))}`)
+    fm.push(
       `month: ${monthKey}`,
-      `participants: [${participants.map(yaml).join(', ')}]`,
+      `participants: [${participantsFm.map(yaml).join(', ')}]`,
       'tags: [carbon-voice]',
       '---',
-      '',
-    ]
+      ''
+    )
     const body: string[] = [`# ${title} — ${formatMonth(monthKey)}`, '']
 
     if (this.settings.includeTranscripts) {
       body.push('## Messages', '')
       for (const m of messages) {
-        const sender = nameById.get(m.creator_id) || 'Unknown'
+        const senderName = nameById.get(m.creator_id) || 'Unknown'
+        const sender = link && senderName !== 'Unknown' ? this.personLink(senderName) : senderName
         const isText = m.is_text_message
         const url = `https://carbonvoice.app/m/${m.message_id}`
         const transcript = messageTranscript(m)
@@ -295,15 +335,9 @@ export class CarbonVoiceSync {
           formatDayShort(m.created_at),
         ]
         if (!isText) parts.push(`${Math.round((m.duration_ms ?? 0) / 1000)}s`)
-        body.push(
-          `### ${parts.join(' · ')}`,
-          transcript || '_[No transcript available]_',
-          '',
-          `<sub><a href="${url}">Open in Carbon Voice ↗</a></sub>`,
-          '',
-          '---',
-          ''
-        )
+        body.push(`### ${parts.join(' · ')}`, transcript || '_[No transcript available]_', '')
+        body.push(...this.audioBlock(m, url, audioPaths.get(m.message_id) ?? null))
+        body.push(`<sub><a href="${url}">Open in Carbon Voice ↗</a></sub>`, '', '---', '')
       }
     }
 
@@ -482,6 +516,158 @@ export class CarbonVoiceSync {
         }
       }
     }
+  }
+
+  // Creates a file only if it doesn't already exist — never overwrites. Used for People/Workspace
+  // stub notes so users can freely annotate them without a later sync clobbering their edits.
+  private async createIfAbsent(rawPath: string, content: string): Promise<void> {
+    const path = normalizePath(rawPath)
+    if (this.app.vault.getAbstractFileByPath(path)) return
+    const dir = path.split('/').slice(0, -1).join('/')
+    if (dir) await this.ensureFolder(dir)
+    try {
+      await this.app.vault.create(path, content)
+    } catch {
+      // Ignore races / already-exists.
+    }
+  }
+
+  // ── Entity notes & links ──────────────────────────────────────────────────
+
+  // Wiki-link to a person/workspace note, addressed by full vault path so it resolves regardless
+  // of same-named notes elsewhere in the vault. `sanitize` matches the note's on-disk filename.
+  private personLink(name: string): string {
+    return `[[${this.root()}/People/${sanitize(name)}|${name}]]`
+  }
+  private workspaceLink(name: string): string {
+    return `[[${this.root()}/Workspaces/${sanitize(name)}|${name}]]`
+  }
+
+  private async ensureEntityNotes(channel: CarbonVoiceChannel): Promise<void> {
+    const ws = channel.workspace_name?.trim()
+    if (ws) await this.ensureWorkspaceNote(ws)
+    for (const c of channel.json_collaborators ?? []) {
+      const name = `${c.first_name ?? ''} ${c.last_name ?? ''}`.trim() || c.user_guid
+      await this.ensurePersonNote(name)
+    }
+  }
+
+  private async ensurePersonNote(name: string): Promise<void> {
+    const path = `${this.root()}/People/${sanitize(name)}.md`
+    await this.createIfAbsent(
+      path,
+      [
+        '---',
+        `title: ${yaml(name)}`,
+        'tags: [carbon-voice, person]',
+        '---',
+        '',
+        `# ${name}`,
+        '',
+        '> Auto-created by Carbon Voice Sync. The backlinks pane lists every conversation and',
+        '> voice memo this person appears in.',
+        '',
+      ].join('\n')
+    )
+  }
+
+  private async ensureWorkspaceNote(name: string): Promise<void> {
+    const path = `${this.root()}/Workspaces/${sanitize(name)}.md`
+    await this.createIfAbsent(
+      path,
+      [
+        '---',
+        `title: ${yaml(name)}`,
+        'tags: [carbon-voice, workspace]',
+        '---',
+        '',
+        `# ${name}`,
+        '',
+        '> Auto-created by Carbon Voice Sync. The backlinks pane lists every conversation and',
+        '> voice memo in this workspace.',
+        '',
+      ].join('\n')
+    )
+  }
+
+  // ── Audio ─────────────────────────────────────────────────────────────────
+
+  // The audio player block for one message, per the active audio mode. Returns lines to splice
+  // into the note body (empty for text messages, mode 'off', or a missing download).
+  private audioBlock(
+    m: CarbonVoiceMessage,
+    messageUrl: string,
+    downloadedPath: string | null
+  ): string[] {
+    if (m.is_text_message) return []
+    switch (this.settings.audioMode) {
+      case 'embed':
+        // The message URL is oEmbed-aware and renders the Carbon Voice player in an iframe;
+        // non-public messages show their own locked state, so no visibility check is needed.
+        return [
+          `<iframe src="${messageUrl}" width="100%" height="180" frameborder="0" allow="autoplay; encrypted-media" loading="lazy"></iframe>`,
+          '',
+        ]
+      case 'download':
+        return downloadedPath ? [`![[${downloadedPath}]]`, ''] : []
+      default:
+        return []
+    }
+  }
+
+  private async collectAudio(
+    api: CarbonVoiceAPI,
+    msgs: CarbonVoiceMessage[]
+  ): Promise<Map<string, string>> {
+    const map = new Map<string, string>()
+    for (const m of msgs) {
+      const p = await this.ensureAudio(api, m)
+      if (p) map.set(m.message_id, p)
+    }
+    return map
+  }
+
+  // Ensures a local copy of a message's audio exists, returning its vault path (or null for text /
+  // undownloadable messages). Audio is immutable, so an existing file is reused — never re-fetched.
+  private async ensureAudio(api: CarbonVoiceAPI, m: CarbonVoiceMessage): Promise<string | null> {
+    if (m.is_text_message) return null
+    const path = `${this.root()}/Media/${m.message_id}.mp3`
+    const norm = normalizePath(path)
+    if (this.app.vault.getAbstractFileByPath(norm)) return path
+    const buf = await this.fetchAudioBuffer(api, m)
+    if (!buf) return null
+    await this.ensureFolder(`${this.root()}/Media`)
+    try {
+      await this.app.vault.createBinary(norm, buf)
+      return path
+    } catch {
+      // A concurrent sync may have written it first; the embed still resolves if it now exists.
+      return this.app.vault.getAbstractFileByPath(norm) ? path : null
+    }
+  }
+
+  // Tries the audio URL already in the message payload first; if that fails (e.g. its presigned
+  // URL has expired), fetches a fresh presigned URL via the v5 message endpoint.
+  private async fetchAudioBuffer(
+    api: CarbonVoiceAPI,
+    m: CarbonVoiceMessage
+  ): Promise<ArrayBuffer | null> {
+    const direct = m.audio_models?.find(a => a.is_original_audio)?.url ?? m.audio_models?.[0]?.url
+    if (direct) {
+      try {
+        return await api.downloadBinary(direct)
+      } catch {
+        // Fall through to a freshly-signed URL.
+      }
+    }
+    try {
+      const v5 = await api.getMessage(m.message_id, { presigned_url: true, fresh: true })
+      const url = v5.audio?.presigned_url ?? v5.audio?.url ?? null
+      if (url) return await api.downloadBinary(url)
+    } catch {
+      // Give up quietly; the note still links out to Carbon Voice.
+    }
+    return null
   }
 }
 

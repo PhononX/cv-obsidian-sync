@@ -113,7 +113,13 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData())
+    const data: Record<string, unknown> = { ...((await this.loadData()) ?? {}) }
+    // Migrate the earlier boolean `downloadAudio` toggle to the `audioMode` setting.
+    if (data.audioMode == null && typeof data.downloadAudio === 'boolean') {
+      data.audioMode = data.downloadAudio ? 'download' : 'off'
+    }
+    delete data.downloadAudio
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data)
   }
 
   async saveSettings() {
