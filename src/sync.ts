@@ -260,7 +260,8 @@ export class CarbonVoiceSync {
     const fm = [
       '---',
       `cv_conversation_id: ${channel.channel_guid}`,
-      `Conversation name: ${yaml(title)}`,
+      `conversation_link: https://carbonvoice.app/c/${channel.channel_guid}`,
+      `conversation_name: ${yaml(title)}`,
       `month: ${monthKey}`,
       `participants: [${participants.map(yaml).join(', ')}]`,
       'tags: [carbon-voice]',
@@ -276,13 +277,18 @@ export class CarbonVoiceSync {
         const isText = m.is_text_message
         const url = `https://carbonvoice.app/m/${m.message_id}`
         const transcript = messageTranscript(m)
-        // 💬 text · 🎙️ audio; duration only shown for audio messages.
-        const parts = [`${isText ? '💬' : '🎙️'} ${sender}`, formatDayShort(m.created_at)]
+        // 💬 text · 🎙️ audio; time before date; duration only shown for audio messages.
+        const parts = [
+          `${isText ? '💬' : '🎙️'} ${sender}`,
+          formatTime(m.created_at),
+          formatDayShort(m.created_at),
+        ]
         if (!isText) parts.push(`${Math.round((m.duration_ms ?? 0) / 1000)}s`)
-        parts.push(`[↗](${url})`)
         body.push(
           `### ${parts.join(' · ')}`,
           transcript || '_[No transcript available]_',
+          '',
+          `<sub>[Open in Carbon Voice ↗](${url})</sub>`,
           '',
           '---',
           ''
@@ -499,6 +505,10 @@ function formatMonth(monthKey: string): string {
 
 function formatDayShort(iso: string): string {
   return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric' })
+}
+
+function formatTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 }
 
 function formatDateTime(iso: string): string {
