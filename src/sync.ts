@@ -7,6 +7,7 @@ import type {
   CarbonVoiceFolder,
   HistoryWindow,
 } from './types'
+import { ASYNC_MEETING_PREFIX } from './types'
 
 export interface SyncResult {
   firstRun: boolean
@@ -46,7 +47,7 @@ export class CarbonVoiceSync {
 
     const messages = await this.collectMessagesSince(api, since)
     const memos = messages.filter(m => this.isVoiceMemo(m) && this.memoInScope(m))
-    const convMsgs = messages.filter(m => this.isConversation(m) && this.convInScope(m))
+    const convMsgs = await this.selectConversationMessages(api, messages)
 
     const voiceMemos = await this.processVoiceMemos(api, memos)
     const conversations = await this.processConversations(api, convMsgs)
@@ -72,7 +73,7 @@ export class CarbonVoiceSync {
       return { firstRun: false, conversations: 0, voiceMemos }
     }
 
-    const convMsgs = messages.filter(m => this.isConversation(m) && this.convInScope(m))
+    const convMsgs = await this.selectConversationMessages(api, messages)
     const conversations = await this.processConversations(api, convMsgs)
     return { firstRun: false, conversations, voiceMemos: 0 }
   }
@@ -310,12 +311,80 @@ export class CarbonVoiceSync {
     return m.type !== 'voicememo' && Array.isArray(m.channel_ids) && m.channel_ids.length > 0
   }
 
+  // Selects the conversation messages to sync, honouring the conversation scope. For the
+  // `by_conversation` scope this also resolves any "all async meetings in <workspace>" rules:
+  // a rule matches every conversation whose channel type is `asyncMeeting`, including ones
+  // created after the rule was set. Channel types aren't on the message, so we look them up
+  // (cache-first) and remember discovered async meetings so they keep syncing.
+  private async selectConversationMessages(
+    api: CarbonVoiceAPI,
+    messages: CarbonVoiceMessage[]
+  ): Promise<CarbonVoiceMessage[]> {
+    const conv = messages.filter(m => this.isConversation(m))
+    const s = this.settings
+
+    // Only the `by_conversation` scope carries async-meeting rules; every other scope is a
+    // pure message-level predicate with no channel fetches needed.
+    const asyncWs = this.asyncRuleWorkspaceIds()
+    if (s.conversationScope !== 'by_conversation' || asyncWs.size === 0) {
+      return conv.filter(m => this.convInScope(m))
+    }
+
+    // Classify the channels of any message in an async-ruled workspace that we haven't seen
+    // before. One fetch per unknown channel; the result is cached across syncs.
+    const cache = s.channelTypeCache
+    const unknown = new Set<string>()
+    for (const m of conv) {
+      if (!m.workspace_ids.some(w => asyncWs.has(w))) continue
+      for (const ch of m.channel_ids) if (!(ch in cache)) unknown.add(ch)
+    }
+
+    let cacheChanged = false
+    for (const ch of unknown) {
+      try {
+        const channel = await api.getChannel(ch)
+        cache[ch] = channel.type
+        cacheChanged = true
+      } catch {
+        // Leave unclassified; a later sync retries once the message resurfaces.
+      }
+    }
+
+    // Materialise newly-discovered async meetings into the selected list so they're visible in
+    // settings and stay synced even if the workspace rule is later removed.
+    const discovered = [...unknown].filter(
+      ch => cache[ch] === 'asyncMeeting' && !s.conversationIds.includes(ch)
+    )
+    if (discovered.length) s.conversationIds.push(...discovered)
+    if (cacheChanged || discovered.length) await this.plugin.saveSettings()
+
+    return conv.filter(m => this.convInScope(m) || this.matchesAsyncRule(m, asyncWs))
+  }
+
+  // Workspace ids named by any `asyncmeeting:<workspace_id>` rule in the selected list.
+  private asyncRuleWorkspaceIds(): Set<string> {
+    const ids = new Set<string>()
+    for (const token of this.settings.conversationIds) {
+      if (token.startsWith(ASYNC_MEETING_PREFIX)) ids.add(token.slice(ASYNC_MEETING_PREFIX.length))
+    }
+    return ids
+  }
+
+  // True when a message belongs to an async-ruled workspace and its channel is (per the cache)
+  // an async meeting.
+  private matchesAsyncRule(m: CarbonVoiceMessage, asyncWs: Set<string>): boolean {
+    if (!m.workspace_ids.some(w => asyncWs.has(w))) return false
+    return m.channel_ids.some(ch => this.settings.channelTypeCache[ch] === 'asyncMeeting')
+  }
+
   private convInScope(m: CarbonVoiceMessage): boolean {
     const s = this.settings
     switch (s.conversationScope) {
       case 'by_workspace':
         return m.workspace_ids.some(w => s.conversationWorkspaceIds.includes(w))
       case 'by_conversation':
+        // Async-meeting rule tokens live in this list too; they never equal a channel GUID, so
+        // this plain-membership check ignores them (matchesAsyncRule handles them separately).
         return m.channel_ids.some(c => s.conversationIds.includes(c))
       default:
         return true

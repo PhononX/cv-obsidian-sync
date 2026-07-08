@@ -225,6 +225,12 @@ export interface ListFoldersResponse {
 
 // ── Plugin settings ─────────────────────────────────────────────────────────
 
+// Synthetic conversation-selection token: "sync every async-meeting conversation in this
+// workspace". Stored alongside plain channel GUIDs in `conversationIds`, exactly like the
+// `root:<workspace_id>` token used for voice-memo folders. The engine resolves it live so
+// async meetings created after the rule was set are picked up automatically.
+export const ASYNC_MEETING_PREFIX = 'asyncmeeting:'
+
 export interface CarbonVoiceSettings {
   apiToken: string
   connectedUserId: string | null
@@ -241,6 +247,10 @@ export interface CarbonVoiceSettings {
   conversationScope: SyncScope
   conversationWorkspaceIds: string[]
   conversationIds: string[]
+
+  // channel_guid → channel type, populated lazily during sync so an async-meeting rule only
+  // fetches each conversation once instead of on every run.
+  channelTypeCache: Record<string, ChannelType>
 
   voiceMemoScope: SyncScope
   voiceMemoWorkspaceIds: string[]
@@ -266,6 +276,7 @@ export const DEFAULT_SETTINGS: CarbonVoiceSettings = {
   conversationScope: 'all',
   conversationWorkspaceIds: [],
   conversationIds: [],
+  channelTypeCache: {},
 
   voiceMemoScope: 'all',
   voiceMemoWorkspaceIds: [],
