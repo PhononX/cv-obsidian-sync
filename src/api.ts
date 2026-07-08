@@ -146,6 +146,15 @@ export class CarbonVoiceAPI {
     return this.post<CarbonVoiceMessage[]>('/v3/messages/recent', params)
   }
 
+  // Downloads a binary asset (e.g. message audio) by URL. No Authorization header: the Carbon
+  // Voice audio URLs are presigned S3 links, and S3 rejects requests that carry both a
+  // query-string signature and a bearer token ("only one auth mechanism allowed").
+  async downloadBinary(url: string): Promise<ArrayBuffer> {
+    const res = await requestUrl({ url, method: 'GET' })
+    if (res.status < 200 || res.status >= 300) throw new Error(`Download failed ${res.status}`)
+    return res.arrayBuffer
+  }
+
   // V5 has transcript and ai_summary as direct fields — prefer this for sync.
   async getMessage(id: string, options: GetMessageOptions = {}): Promise<CarbonVoiceMessageV5> {
     const params = new URLSearchParams()

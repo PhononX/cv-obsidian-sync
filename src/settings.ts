@@ -9,6 +9,7 @@ import type {
   WorkspaceType,
   WorkspaceRole,
   SyncScope,
+  AudioMode,
 } from './types'
 import { ASYNC_MEETING_PREFIX } from './types'
 
@@ -220,6 +221,37 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.includeTranscripts)
           .onChange(async value => {
             this.plugin.settings.includeTranscripts = value
+            await this.plugin.saveSettings()
+          })
+      )
+
+    new Setting(containerEl)
+      .setName('Link people & workspaces')
+      .setDesc(
+        'Create People and Workspace notes and link participants, senders and workspaces so the graph and backlinks connect everything'
+      )
+      .addToggle(toggle =>
+        toggle
+          .setValue(this.plugin.settings.linkNotes)
+          .onChange(async value => {
+            this.plugin.settings.linkNotes = value
+            await this.plugin.saveSettings()
+          })
+      )
+
+    new Setting(containerEl)
+      .setName('Audio playback')
+      .setDesc(
+        'Embed player: inline Carbon Voice player, no vault storage (private messages show their locked state). Download: save audio for offline playback (uses vault space). Off: link out only.'
+      )
+      .addDropdown(drop =>
+        drop
+          .addOption('embed', 'Embed player')
+          .addOption('download', 'Download for offline')
+          .addOption('off', 'Off (link only)')
+          .setValue(this.plugin.settings.audioMode)
+          .onChange(async value => {
+            this.plugin.settings.audioMode = value as AudioMode
             await this.plugin.saveSettings()
           })
       )
