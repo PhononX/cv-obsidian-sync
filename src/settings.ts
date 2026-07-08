@@ -10,6 +10,7 @@ import type {
   WorkspaceRole,
   SyncScope,
 } from './types'
+import { ASYNC_MEETING_PREFIX } from './types'
 
 // Small first batch for a snappy initial load, then larger pages — mirrors the reference client.
 const CHANNEL_FIRST_PAGE_SIZE = 20
@@ -657,20 +658,57 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
   }
 
   private renderConversationSelector(containerEl: HTMLElement): void {
-    const items =
+    // Conversations are grouped under a per-workspace separator so each workspace can host an
+    // "All async meetings in <workspace>" rule as its first row (mirrors the folder selector's
+    // synthetic `root:<ws>` entries). Channels already carry their workspace name; we also pull
+    // the full workspace list so the async-meeting rule is offered for every workspace, not just
+    // ones whose channels have paged in yet.
+    if (this.workspaces === null && !this.workspacesLoading) void this.loadWorkspaces()
+
+    const wsNameById = new Map<string, string>()
+    if (this.workspaces) for (const w of this.workspaces) wsNameById.set(w.id, w.name)
+    if (this.channels) {
+      for (const c of this.channels) {
+        if (c.workspace_guid && !wsNameById.has(c.workspace_guid)) {
+          wsNameById.set(c.workspace_guid, c.workspace_name || c.workspace_guid)
+        }
+      }
+    }
+
+    const wsName = (id: string) => wsNameById.get(id) ?? id
+    const wsIds = [...wsNameById.keys()].sort((a, b) => {
+      if (a === 'Personal') return -1
+      if (b === 'Personal') return 1
+      return wsName(a).localeCompare(wsName(b))
+    })
+    const sectionOrder = wsIds.map(wsName)
+
+    // One "All async meetings" rule per workspace, listed first within its section.
+    const asyncItems = wsIds.map(id => ({
+      id: `${ASYNC_MEETING_PREFIX}${id}`,
+      label: 'All async meetings',
+      sublabel: `Auto-syncs every async meeting in ${wsName(id)}`,
+      section: wsName(id),
+    }))
+
+    const channelItems =
       this.channels === null
-        ? null
+        ? []
         : [...this.channels]
             .sort((a, b) => this.sortOrderMs(b) - this.sortOrderMs(a))
             .map(c => ({
               id: c.channel_guid,
               label: this.channelName(c),
               sublabel: this.channelSublabel(c),
+              section: c.workspace_guid ? wsName(c.workspace_guid) : c.workspace_name || 'Other',
             }))
+
+    const items = this.channels === null ? null : [...asyncItems, ...channelItems]
 
     this.renderDualListbox(containerEl, {
       noun: 'conversation',
       items,
+      sectionOrder,
       loading: this.channelsLoading,
       error: this.channelsError,
       hasMore: this.channelsHasMore,
