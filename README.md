@@ -98,10 +98,12 @@ git push --follow-tags            # pushes the branch and the version tag
 ```
 
 Pushing the tag triggers a build and creates a **draft** GitHub release with
-`main.js` and `manifest.json` attached as assets. Review it and publish. The
+`main.js`, `manifest.json`, and `styles.css` attached as assets. Review it and
+publish (drafts are invisible to BRAT and downloaders until published). The
 `npm version` step keeps `manifest.json` and `versions.json` in sync with the
-tag, so the release name always matches the plugin version (no `v` prefix), as
-Obsidian requires.
+tag, and `.npmrc` sets `tag-version-prefix=""` so the tag has no `v` prefix —
+the release name then always matches the plugin version exactly, as Obsidian
+requires. The workflow fails fast if the tag and manifest version disagree.
 
 ## License
 
