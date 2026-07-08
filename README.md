@@ -30,6 +30,16 @@ voice memos into your Obsidian vault as Markdown notes.
   365 days, or all time).
 - **Background sync** on a configurable interval, and optional sync on startup.
 - **Optional transcripts** — include or omit message transcripts in your notes.
+- **Linked knowledge graph** — participants, message senders and workspaces become
+  `[[wiki links]]` to auto-generated **People** and **Workspace** notes, so the
+  Obsidian graph and backlinks connect every conversation and memo. Those stub notes
+  are created once and never overwritten, so you can annotate them freely.
+- **AI summaries** — a voice memo's Carbon Voice summary is written into a `## Summary`
+  section at the top of its note.
+- **Audio playback in your notes** — each message's audio can be downloaded into a
+  `Media` folder and embedded as a native player, so you can listen right next to the
+  transcript, offline. (Carbon Voice audio links are short-lived, so a local copy is what
+  makes durable playback possible.) Toggle it off if you'd rather keep the vault lean.
 
 > **Status:** `0.1.0` is an early release. Account connection and all sync
 > configuration (scopes, folders, workspaces, history windows) are in place; the

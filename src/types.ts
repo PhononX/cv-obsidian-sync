@@ -241,6 +241,12 @@ export interface CarbonVoiceSettings {
   syncFolder: string
   syncInterval: number
   includeTranscripts: boolean
+  // Cross-link notes: generate People/Workspace stub notes and link participants, senders and
+  // workspaces so the Obsidian graph and backlinks connect everything.
+  linkNotes: boolean
+  // Download message audio into the vault so notes get a native, offline audio player. The
+  // Carbon Voice audio URLs are presigned and expire, so durable playback requires a local copy.
+  downloadAudio: boolean
   syncOnStartup: boolean
   lastSyncTimestamp: string | null
 
@@ -270,6 +276,8 @@ export const DEFAULT_SETTINGS: CarbonVoiceSettings = {
   syncFolder: 'Carbon Voice',
   syncInterval: 15,
   includeTranscripts: true,
+  linkNotes: true,
+  downloadAudio: true,
   syncOnStartup: true,
   lastSyncTimestamp: null,
 

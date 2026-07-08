@@ -225,6 +225,34 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
       )
 
     new Setting(containerEl)
+      .setName('Link people & workspaces')
+      .setDesc(
+        'Create People and Workspace notes and link participants, senders and workspaces so the graph and backlinks connect everything'
+      )
+      .addToggle(toggle =>
+        toggle
+          .setValue(this.plugin.settings.linkNotes)
+          .onChange(async value => {
+            this.plugin.settings.linkNotes = value
+            await this.plugin.saveSettings()
+          })
+      )
+
+    new Setting(containerEl)
+      .setName('Download audio for playback')
+      .setDesc(
+        'Save each message’s audio into a Media folder and embed a player in the note. Enables offline playback but uses vault space.'
+      )
+      .addToggle(toggle =>
+        toggle
+          .setValue(this.plugin.settings.downloadAudio)
+          .onChange(async value => {
+            this.plugin.settings.downloadAudio = value
+            await this.plugin.saveSettings()
+          })
+      )
+
+    new Setting(containerEl)
       .setName('Sync on startup')
       .setDesc('Automatically sync when Obsidian opens')
       .addToggle(toggle =>
