@@ -18,8 +18,8 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
     this.addRibbonIcon('microphone', 'Sync Carbon Voice', () => this.runSync())
 
     this.addCommand({
-      id: 'sync-carbon-voice',
-      name: 'Sync Carbon Voice now',
+      id: 'sync-now',
+      name: 'Sync now',
       callback: () => this.runSync(),
     })
 
