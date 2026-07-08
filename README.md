@@ -6,6 +6,17 @@ voice memos into your Obsidian vault as Markdown notes.
 > **Desktop only.** This plugin talks to the Carbon Voice API over the network
 > and is not available on Obsidian Mobile.
 
+## Use cases
+
+- **Async meeting notes in your vault.** Just as people pull meeting recordings
+  and transcriptions into Obsidian, this brings your Carbon Voice async
+  conversations in automatically — so the discussion, decisions, and transcripts
+  live alongside the rest of your notes and are there to refer back to later.
+- **Feed your second brain by voice.** Drop a quick thought into a Carbon Voice
+  voice memo and it gets transcribed and synced into Obsidian on its own — no
+  typing, no copy-paste. Capture ideas the moment they happen and let them flow
+  straight into your knowledge base.
+
 ## Features
 
 - **Connect your Carbon Voice account** with a Personal Access Token — the token
