@@ -237,7 +237,7 @@ export class CarbonVoiceSync {
         )
         if (msgs.length === 0) continue
         msgs.sort((a, b) => a.created_at.localeCompare(b.created_at))
-        const path = `${this.root()}/Conversations/${sanitize(channelName(channel))}/${month} Messages.md`
+        const path = `${this.root()}/Conversations/${sanitize(workspaceName(channel))}/${sanitize(channelName(channel))}/${month} Messages.md`
         await this.upsertFile(path, this.buildConversationNote(channel, month, msgs))
         count++
       }
@@ -404,6 +404,10 @@ export class CarbonVoiceSync {
 
 function channelName(c: CarbonVoiceChannel): string {
   return c.channel_name?.trim() || `Conversation ${c.channel_guid.slice(0, 8)}`
+}
+
+function workspaceName(c: CarbonVoiceChannel): string {
+  return c.workspace_name?.trim() || 'Unfiled'
 }
 
 function extractText(m: CarbonVoiceMessage, type: string): string | null {

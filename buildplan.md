@@ -264,10 +264,10 @@ interface CarbonVoiceSettings {
 
 ## Note Generation (`sync.ts`)
 
-### Conversations — one folder per conversation, one file per month
+### Conversations — grouped by workspace, one folder per conversation, one file per month
 
-**Folder path:** `{syncFolder}/Conversations/{title}/`
-**File path:** `{syncFolder}/Conversations/{title}/YYYY-MM.md`
+**Folder path:** `{syncFolder}/Conversations/{workspace}/{title}/`
+**File path:** `{syncFolder}/Conversations/{workspace}/{title}/YYYY-MM Messages.md`
 - Month derived from each message's `created_at`
 - Messages are grouped by month and written into their respective file
 - On upsert, regenerate the full month file from all known messages for that month
