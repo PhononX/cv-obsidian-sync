@@ -269,6 +269,11 @@ export interface CarbonVoiceSettings {
 
   conversationHistoryWindow: HistoryWindow
   voiceMemoHistoryWindow: HistoryWindow
+
+  // Maps a stable content key (e.g. `conv:<channel>:<month>` / `memo:<id>`) to the vault path we
+  // last wrote it to. Lets a later sync move a renamed note and delete one whose source is gone,
+  // instead of leaving an orphaned duplicate behind.
+  noteIndex: Record<string, string>
 }
 
 export const DEFAULT_SETTINGS: CarbonVoiceSettings = {
@@ -297,4 +302,6 @@ export const DEFAULT_SETTINGS: CarbonVoiceSettings = {
 
   conversationHistoryWindow: 30,
   voiceMemoHistoryWindow: 30,
+
+  noteIndex: {},
 }

@@ -1,4 +1,4 @@
-import { TFile, normalizePath } from 'obsidian'
+import { TFile, TFolder, normalizePath } from 'obsidian'
 import type CarbonVoiceSyncPlugin from './main'
 import { CarbonVoiceAPI } from './api'
 import type {
@@ -18,8 +18,16 @@ export interface SyncResult {
 const PAGE = 200
 const MAX_PAGES = 500 // safety cap on pagination loops
 
+// Everything the sync writes goes above this marker; anything a user types below it is preserved
+// across re-syncs. `MARKER_KEY` is the stable substring used to locate the marker in an old file.
+const MARKER_KEY = 'carbon-voice-sync:managed-above'
+const USER_SECTION_MARKER = `%% ${MARKER_KEY} — Carbon Voice manages everything above this line. Notes you add below are kept across syncs. %%`
+
 export class CarbonVoiceSync {
   constructor(private plugin: CarbonVoiceSyncPlugin) {}
+
+  // Set when the persisted note index changes during a run, so we save once at the end.
+  private indexDirty = false
 
   private get app() {
     return this.plugin.app
@@ -147,8 +155,14 @@ export class CarbonVoiceSync {
     api: CarbonVoiceAPI,
     memos: CarbonVoiceMessage[]
   ): Promise<number> {
+    // Drop notes for memos deleted since last sync (they resurface here with `deleted_at` set).
+    for (const m of memos.filter(m => m.deleted_at)) await this.removeNote(`memo:${m.message_id}`)
+
     const live = memos.filter(m => !m.deleted_at && !isPending(m))
-    if (live.length === 0) return 0
+    if (live.length === 0) {
+      await this.flushIndex()
+      return 0
+    }
 
     const folders = await this.fetchFolders(api)
     const workspaces = await this.fetchWorkspaceNames(api)
@@ -174,8 +188,10 @@ export class CarbonVoiceSync {
         path,
         this.buildVoiceMemoNote(m, subpath, title, transcript, summary, wsName, creatorName, audioPath)
       )
+      await this.recordNote(`memo:${m.message_id}`, path)
       count++
     }
+    await this.flushIndex()
     return count
   }
 
@@ -228,12 +244,14 @@ export class CarbonVoiceSync {
       body.push('## Transcript', transcript || '> No transcript available yet.', '')
     }
     body.push(...this.audioBlock(m, memoUrl, audioPath))
+    body.push(...this.attachmentsBlock(m))
 
     body.push('## Metadata')
     if (link && creatorName) body.push(`- **From:** ${this.personLink(creatorName)}`)
     if (link && wsName) body.push(`- **Workspace:** ${this.workspaceLink(wsName)}`)
+    const datePrefix = link ? `[[${m.created_at.slice(0, 10)}]] · ` : ''
     body.push(
-      `- **Date:** ${formatDateTime(m.created_at)}`,
+      `- **Date:** ${datePrefix}${formatDateTime(m.created_at)}`,
       `- **Duration:** ${durationSec}s`,
       `- **Synced:** ${formatDateTime(new Date().toISOString())}`,
       `- [Open in Carbon Voice ↗](${memoUrl})`,
@@ -248,10 +266,10 @@ export class CarbonVoiceSync {
     api: CarbonVoiceAPI,
     convMsgs: CarbonVoiceMessage[]
   ): Promise<number> {
-    const live = convMsgs.filter(m => !m.deleted_at && !isPending(m))
-    // Which (channel, month) files were touched?
+    // Which (channel, month) files were touched? Include deleted messages so a month that lost
+    // its last message is revisited and its now-empty file removed.
     const touched = new Map<string, Set<string>>()
-    for (const m of live) {
+    for (const m of convMsgs.filter(m => !isPending(m))) {
       const month = m.created_at.slice(0, 7)
       for (const ch of m.channel_ids) {
         if (!touched.has(ch)) touched.set(ch, new Set())
@@ -267,12 +285,17 @@ export class CarbonVoiceSync {
         channel = await api.getChannel(ch)
         channelCache.set(ch, channel)
       }
-      if (this.settings.linkNotes) await this.ensureEntityNotes(channel)
       for (const month of months) {
+        const key = `conv:${ch}:${month}`
         const msgs = (await this.fetchChannelMonth(api, ch, month)).filter(
           m => !m.deleted_at && !isPending(m)
         )
-        if (msgs.length === 0) continue
+        if (msgs.length === 0) {
+          // Every message in this month is gone — remove the file we previously wrote for it.
+          await this.removeNote(key)
+          continue
+        }
+        if (this.settings.linkNotes) await this.ensureEntityNotes(channel)
         msgs.sort((a, b) => a.created_at.localeCompare(b.created_at))
         const audioPaths =
           this.settings.audioMode === 'download'
@@ -280,9 +303,11 @@ export class CarbonVoiceSync {
             : new Map<string, string>()
         const path = `${this.root()}/Conversations/${sanitize(workspaceName(channel))}/${sanitize(channelName(channel))}/${month} Messages.md`
         await this.upsertFile(path, this.buildConversationNote(channel, month, msgs, audioPaths))
+        await this.recordNote(key, path)
         count++
       }
     }
+    await this.flushIndex()
     return count
   }
 
@@ -320,9 +345,25 @@ export class CarbonVoiceSync {
     )
     const body: string[] = [`# ${title} — ${formatMonth(monthKey)}`, '']
 
+    // Conversation context: the channel's own description, shown as an Obsidian callout.
+    const about = channel.channel_description?.trim()
+    if (about) body.push('> [!info] About', ...about.split('\n').map(l => `> ${l}`), '')
+
+    // Summary digest: one line per message that carries an AI summary — a skim of the month.
+    const digest = messages
+      .map(m => ({ who: nameById.get(m.creator_id) || 'Unknown', s: extractText(m, 'summary') }))
+      .filter((d): d is { who: string; s: string } => !!d.s)
+    if (digest.length) {
+      body.push('## Summary', '')
+      for (const d of digest) body.push(`- **${d.who}:** ${d.s}`)
+      body.push('')
+    }
+
     if (this.settings.includeTranscripts) {
       body.push('## Messages', '')
-      for (const m of messages) {
+      // Order messages as threads: each message is followed by its replies (recursively), so a
+      // reply sits directly under the message it answers instead of wherever it fell in time.
+      for (const { m, depth } of threadOrder(messages)) {
         const senderName = nameById.get(m.creator_id) || 'Unknown'
         const sender = link && senderName !== 'Unknown' ? this.personLink(senderName) : senderName
         const isText = m.is_text_message
@@ -330,13 +371,23 @@ export class CarbonVoiceSync {
         const transcript = messageTranscript(m)
         // 💬 text · 🎙️ audio; time before date; duration only shown for audio messages.
         const parts = [
-          `${isText ? '💬' : '🎙️'} ${sender}`,
+          `${depth > 0 ? '↳ ' : ''}${isText ? '💬' : '🎙️'} ${sender}`,
           formatTime(m.created_at),
-          formatDayShort(m.created_at),
+          this.dayCell(m.created_at),
         ]
         if (!isText) parts.push(`${Math.round((m.duration_ms ?? 0) / 1000)}s`)
-        body.push(`### ${parts.join(' · ')}`, transcript || '_[No transcript available]_', '')
+        body.push(`### ${parts.join(' · ')}`)
+        // Reply context: name who is being answered when the parent isn't in this file.
+        const parentName = m.parent_message_id ? nameById.get(parentCreator(messages, m)) : undefined
+        if (depth === 0 && m.parent_message_id) {
+          const parentUrl = `https://carbonvoice.app/m/${m.parent_message_id}`
+          body.push(`<sub>↳ reply · <a href="${parentUrl}">see parent ↗</a></sub>`, '')
+        } else if (depth > 0 && parentName) {
+          body.push(`<sub>↳ in reply to ${parentName}</sub>`, '')
+        }
+        body.push(transcript || '_[No transcript available]_', '')
         body.push(...this.audioBlock(m, url, audioPaths.get(m.message_id) ?? null))
+        body.push(...this.attachmentsBlock(m))
         body.push(`<sub><a href="${url}">Open in Carbon Voice ↗</a></sub>`, '', '---', '')
       }
     }
@@ -491,16 +542,92 @@ export class CarbonVoiceSync {
     return new Date(Date.now() - window * 24 * 60 * 60 * 1000).toISOString()
   }
 
-  private async upsertFile(rawPath: string, content: string): Promise<void> {
+  // Writes a managed note. The generated content is placed above a marker line; whatever the user
+  // has written below the marker in an existing file is carried over verbatim, so re-syncs never
+  // clobber annotations. New files get an empty area below the marker to write in.
+  private async upsertFile(rawPath: string, generated: string): Promise<void> {
     const path = normalizePath(rawPath)
     const existing = this.app.vault.getAbstractFileByPath(path)
     if (existing instanceof TFile) {
-      await this.app.vault.process(existing, () => content)
+      await this.app.vault.process(existing, data =>
+        this.wrapManaged(generated, this.preservedTail(data))
+      )
       return
     }
     const dir = path.split('/').slice(0, -1).join('/')
     if (dir) await this.ensureFolder(dir)
-    await this.app.vault.create(path, content)
+    await this.app.vault.create(path, this.wrapManaged(generated, ''))
+  }
+
+  private wrapManaged(generated: string, preserved: string): string {
+    const base = generated.endsWith('\n') ? generated : `${generated}\n`
+    // A leading newline gives new files a blank line to type on under the marker.
+    return `${base}\n${USER_SECTION_MARKER}\n${preserved || '\n'}`
+  }
+
+  // Content after the managed marker in an existing file (the user-owned region). Empty when the
+  // file predates the marker or has none — those files are simply re-wrapped on this sync.
+  private preservedTail(content: string): string {
+    const idx = content.indexOf(MARKER_KEY)
+    if (idx === -1) return ''
+    const nl = content.indexOf('\n', idx)
+    return nl === -1 ? '' : content.slice(nl + 1)
+  }
+
+  // ── Note index (rename / delete reconciliation) ────────────────────────────
+
+  // Record that `key` now lives at `path`. If it previously lived elsewhere (e.g. the conversation
+  // or memo was renamed), the stale file is removed and its empty folders pruned.
+  private async recordNote(key: string, path: string): Promise<void> {
+    const prev = this.settings.noteIndex[key]
+    const norm = normalizePath(path)
+    if (prev && normalizePath(prev) !== norm) await this.deleteFileAndPrune(prev)
+    if (prev !== norm) {
+      this.settings.noteIndex[key] = norm
+      this.indexDirty = true
+    }
+  }
+
+  // Remove the note previously written for `key` (its source was deleted or the month emptied).
+  private async removeNote(key: string): Promise<void> {
+    const prev = this.settings.noteIndex[key]
+    if (!prev) return
+    await this.deleteFileAndPrune(prev)
+    delete this.settings.noteIndex[key]
+    this.indexDirty = true
+  }
+
+  // Trashes a note (recoverable, not hard-deleted) and prunes now-empty ancestor folders up to,
+  // but not including, the sync root.
+  private async deleteFileAndPrune(rawPath: string): Promise<void> {
+    const path = normalizePath(rawPath)
+    const file = this.app.vault.getAbstractFileByPath(path)
+    if (file instanceof TFile) {
+      try {
+        await this.app.vault.trash(file, false)
+      } catch {
+        return
+      }
+    }
+    const rootPath = normalizePath(this.root())
+    let dir = path.split('/').slice(0, -1).join('/')
+    while (dir && dir !== rootPath && dir.startsWith(`${rootPath}/`)) {
+      const folder = this.app.vault.getAbstractFileByPath(dir)
+      if (folder instanceof TFolder && folder.children.length === 0) {
+        try {
+          await this.app.vault.trash(folder, false)
+        } catch {
+          break
+        }
+        dir = dir.split('/').slice(0, -1).join('/')
+      } else break
+    }
+  }
+
+  private async flushIndex(): Promise<void> {
+    if (!this.indexDirty) return
+    this.indexDirty = false
+    await this.plugin.saveSettings()
   }
 
   private async ensureFolder(dir: string): Promise<void> {
@@ -615,6 +742,25 @@ export class CarbonVoiceSync {
     }
   }
 
+  // Attachment list for a message (files shared alongside it). Empty when there are none.
+  private attachmentsBlock(m: CarbonVoiceMessage): string[] {
+    const atts = m.attachments ?? []
+    if (!atts.length) return []
+    const lines = ['**Attachments:**']
+    for (const a of atts) {
+      const label = a.filename?.trim() || a.type || 'file'
+      lines.push(a.link ? `- 📎 [${label}](${a.link})` : `- 📎 ${label}`)
+    }
+    lines.push('')
+    return lines
+  }
+
+  // A day as a `[[YYYY-MM-DD]]` daily-note link (when linking is on) or plain text otherwise.
+  private dayCell(iso: string): string {
+    const d = iso.slice(0, 10)
+    return this.settings.linkNotes ? `[[${d}|${formatDayShort(iso)}]]` : formatDayShort(iso)
+  }
+
   private async collectAudio(
     api: CarbonVoiceAPI,
     msgs: CarbonVoiceMessage[]
@@ -672,6 +818,47 @@ export class CarbonVoiceSync {
 }
 
 // ── Pure helpers ────────────────────────────────────────────────────────────
+
+// Orders messages so each appears immediately before its replies (depth-first). Replies whose
+// parent isn't in this set are treated as roots; siblings keep chronological order. A seen-set
+// guards against parent cycles and guarantees every message is emitted exactly once.
+function threadOrder(
+  messages: CarbonVoiceMessage[]
+): Array<{ m: CarbonVoiceMessage; depth: number }> {
+  const byId = new Map(messages.map(m => [m.message_id, m]))
+  const children = new Map<string, CarbonVoiceMessage[]>()
+  const roots: CarbonVoiceMessage[] = []
+  for (const m of messages) {
+    const parent = m.parent_message_id && byId.has(m.parent_message_id) ? m.parent_message_id : null
+    if (parent) {
+      const arr = children.get(parent) ?? []
+      arr.push(m)
+      children.set(parent, arr)
+    } else {
+      roots.push(m)
+    }
+  }
+  const byCreated = (a: CarbonVoiceMessage, b: CarbonVoiceMessage) =>
+    a.created_at.localeCompare(b.created_at)
+  const out: Array<{ m: CarbonVoiceMessage; depth: number }> = []
+  const seen = new Set<string>()
+  const visit = (m: CarbonVoiceMessage, depth: number) => {
+    if (seen.has(m.message_id)) return
+    seen.add(m.message_id)
+    out.push({ m, depth })
+    for (const kid of (children.get(m.message_id) ?? []).sort(byCreated)) visit(kid, depth + 1)
+  }
+  roots.sort(byCreated).forEach(r => visit(r, 0))
+  // Any message left unseen (part of a cycle) is appended so nothing is dropped.
+  for (const m of messages) if (!seen.has(m.message_id)) out.push({ m, depth: 0 })
+  return out
+}
+
+// creator_id of a message's parent, when the parent is in this set (else '').
+function parentCreator(messages: CarbonVoiceMessage[], m: CarbonVoiceMessage): string {
+  if (!m.parent_message_id) return ''
+  return messages.find(x => x.message_id === m.parent_message_id)?.creator_id ?? ''
+}
 
 function channelName(c: CarbonVoiceChannel): string {
   return c.channel_name?.trim() || `Conversation ${c.channel_guid.slice(0, 8)}`

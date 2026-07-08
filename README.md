@@ -35,7 +35,17 @@ voice memos into your Obsidian vault as Markdown notes.
   Obsidian graph and backlinks connect every conversation and memo. Those stub notes
   are created once and never overwritten, so you can annotate them freely.
 - **AI summaries** — a voice memo's Carbon Voice summary is written into a `## Summary`
-  section at the top of its note.
+  section at the top of its note, and each conversation note gets a summary digest built
+  from its messages' summaries plus an _About_ callout from the conversation description.
+- **Threaded replies** — replies are nested directly under the message they answer, with
+  an "in reply to" cue, instead of scattered by timestamp.
+- **Attachments & dates** — files shared in a message are listed with links, and each
+  note's dates link to your daily notes (`[[YYYY-MM-DD]]`).
+- **Safe to edit** — synced notes have a marker line; anything you write _below_ it is
+  preserved across every re-sync, while Carbon Voice keeps the content above it current.
+- **Stays tidy** — renaming a conversation or moving a memo in Carbon Voice moves its note
+  (no orphaned duplicate), and deleting a message or memo removes its note (to your vault's
+  trash, so it's recoverable).
 - **Audio playback in your notes** — listen right next to the transcript. Choose how:
   - _Embed player_ (default) — inline Carbon Voice player, nothing stored in your vault;
     private messages show their own locked state.
