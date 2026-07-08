@@ -8,6 +8,7 @@ import type {
   HistoryWindow,
 } from './types'
 import { ASYNC_MEETING_PREFIX } from './types'
+import { formatTranscript } from './transcript-format'
 
 export interface SyncResult {
   firstRun: boolean
@@ -225,7 +226,10 @@ export class CarbonVoiceSync {
     const body: string[] = [`# ${title}`, '']
     if (summary) body.push('## Summary', summary, '')
     if (this.settings.includeTranscripts) {
-      body.push('## Transcript', transcript || '> No transcript available yet.', '')
+      const readable = transcript
+        ? formatTranscript(transcript, transcriptLanguage(m))
+        : '> No transcript available yet.'
+      body.push('## Transcript', readable, '')
     }
     body.push(...this.audioBlock(m, memoUrl, audioPath))
 
@@ -335,7 +339,11 @@ export class CarbonVoiceSync {
           formatDayShort(m.created_at),
         ]
         if (!isText) parts.push(`${Math.round((m.duration_ms ?? 0) / 1000)}s`)
-        body.push(`### ${parts.join(' · ')}`, transcript || '_[No transcript available]_', '')
+        body.push(
+          `### ${parts.join(' · ')}`,
+          transcript ? formatTranscript(transcript, transcriptLanguage(m)) : '_[No transcript available]_',
+          ''
+        )
         body.push(...this.audioBlock(m, url, audioPaths.get(m.message_id) ?? null))
         body.push(`<sub><a href="${url}">Open in Carbon Voice ↗</a></sub>`, '', '---', '')
       }
@@ -704,6 +712,16 @@ function messageTranscript(m: CarbonVoiceMessage): string | null {
     }
   }
   return null
+}
+
+// Language of a message's transcript, taken from the same text model `messageTranscript` reads.
+// Feeds the paragraph formatter so each transcript is reflowed with its own language's rules.
+function transcriptLanguage(m: CarbonVoiceMessage): string | undefined {
+  for (const type of ['transcript', 'transcript_with_timecode']) {
+    const model = m.text_models?.find(t => t.type === type)
+    if (model) return model.language_id || undefined
+  }
+  return undefined
 }
 
 // A message still processing (e.g. transcription pending) isn't `active` yet. We skip it and
