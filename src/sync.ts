@@ -461,7 +461,7 @@ export class CarbonVoiceSync {
     const path = normalizePath(rawPath)
     const existing = this.app.vault.getAbstractFileByPath(path)
     if (existing instanceof TFile) {
-      await this.app.vault.modify(existing, content)
+      await this.app.vault.process(existing, () => content)
       return
     }
     const dir = path.split('/').slice(0, -1).join('/')
