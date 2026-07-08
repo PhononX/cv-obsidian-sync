@@ -1,0 +1,54 @@
+name: Release Obsidian plugin
+
+# Cutting a release is just pushing a tag whose name matches manifest.json's
+# version (no leading "v"), e.g. `git tag 0.1.0 && git push origin 0.1.0`.
+# This workflow then builds main.js and attaches it — alongside manifest.json —
+# as top-level release assets, which is exactly what Obsidian, BRAT, and the
+# community store expect.
+on:
+  push:
+    tags:
+      - "*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Verify tag matches manifest version
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          manifest_version="$(node -p "require('./manifest.json').version")"
+          if [ "$tag" != "$manifest_version" ]; then
+            echo "::error::Tag ($tag) does not match manifest.json version ($manifest_version)."
+            echo "Bump the version with 'npm version <patch|minor|major>' so the tag and manifest agree."
+            exit 1
+          fi
+
+      - name: Create draft release with plugin assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          # Attach the built bundle and the manifest as individual, top-level
+          # assets. Obsidian downloads these by name, so they must not be zipped
+          # or nested. styles.css is omitted because this plugin ships none.
+          gh release create "$tag" \
+            --title "$tag" \
+            --draft \
+            --generate-notes \
+            main.js manifest.json
