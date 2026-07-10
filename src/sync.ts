@@ -499,8 +499,11 @@ export class CarbonVoiceSync {
 
   private async upsertFile(rawPath: string, content: string): Promise<void> {
     const path = normalizePath(rawPath)
-    const existing = this.resolveExistingFile(path)
-    if (existing) {
+    // Exact-case lookup only: on a case-sensitive filesystem two paths differing only in case are
+    // genuinely separate notes, so we must not resolve one to the other here — that would clobber
+    // a distinct file. Overwrite only when the exact path already holds a note.
+    const existing = this.app.vault.getAbstractFileByPath(path)
+    if (existing instanceof TFile) {
       await this.app.vault.process(existing, () => content)
       return
     }
@@ -509,24 +512,21 @@ export class CarbonVoiceSync {
     try {
       await this.app.vault.create(path, content)
     } catch (err) {
-      // The vault index is case-sensitive but most filesystems (macOS, Windows) are not, so a
-      // path that differs only in case from an existing note misses the lookup above and then
-      // collides on disk — Obsidian throws "File already exists". A folder or hand-made note can
-      // occupy the path too. Recover by overwriting the file that's actually there instead of
-      // aborting the whole import; only re-throw if nothing resolves.
-      const collided = this.resolveExistingFile(path)
+      // The vault index is case-sensitive but macOS/Windows filesystems are not, so a path that
+      // differs only in case from an existing note passes the exact-case check above yet collides
+      // on disk — Obsidian throws "File already exists". Recover by overwriting the note that
+      // actually occupies the slot instead of aborting the whole import. Only reached on a throw,
+      // so case-sensitive filesystems (where create succeeds) never pay this scan. Re-throw when
+      // nothing resolves — a genuine error, or a folder occupying the path we can't overwrite.
+      const collided = this.resolveCaseInsensitive(path)
       if (!collided) throw err
       await this.app.vault.process(collided, () => content)
     }
   }
 
-  // Resolves a vault path to its TFile, tolerating the case-insensitive-filesystem mismatch: an
-  // exact-case hit is preferred, else a case-insensitive scan finds the note that occupies the
-  // same on-disk slot. Returns null when no file (folders don't count) lives at the path.
-  private resolveExistingFile(path: string): TFile | null {
-    const direct = this.app.vault.getAbstractFileByPath(path)
-    if (direct instanceof TFile) return direct
-    if (direct) return null // a folder (or other non-file) occupies the exact path
+  // Finds the note occupying `path` on a case-insensitive filesystem when the exact-case index
+  // lookup missed. Returns null when no file (folders don't count) matches.
+  private resolveCaseInsensitive(path: string): TFile | null {
     const lower = path.toLowerCase()
     for (const f of this.app.vault.getFiles()) {
       if (f.path.toLowerCase() === lower) return f
