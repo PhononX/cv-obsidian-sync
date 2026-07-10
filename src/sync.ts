@@ -499,14 +499,39 @@ export class CarbonVoiceSync {
 
   private async upsertFile(rawPath: string, content: string): Promise<void> {
     const path = normalizePath(rawPath)
-    const existing = this.app.vault.getAbstractFileByPath(path)
-    if (existing instanceof TFile) {
+    const existing = this.resolveExistingFile(path)
+    if (existing) {
       await this.app.vault.process(existing, () => content)
       return
     }
     const dir = path.split('/').slice(0, -1).join('/')
     if (dir) await this.ensureFolder(dir)
-    await this.app.vault.create(path, content)
+    try {
+      await this.app.vault.create(path, content)
+    } catch (err) {
+      // The vault index is case-sensitive but most filesystems (macOS, Windows) are not, so a
+      // path that differs only in case from an existing note misses the lookup above and then
+      // collides on disk — Obsidian throws "File already exists". A folder or hand-made note can
+      // occupy the path too. Recover by overwriting the file that's actually there instead of
+      // aborting the whole import; only re-throw if nothing resolves.
+      const collided = this.resolveExistingFile(path)
+      if (!collided) throw err
+      await this.app.vault.process(collided, () => content)
+    }
+  }
+
+  // Resolves a vault path to its TFile, tolerating the case-insensitive-filesystem mismatch: an
+  // exact-case hit is preferred, else a case-insensitive scan finds the note that occupies the
+  // same on-disk slot. Returns null when no file (folders don't count) lives at the path.
+  private resolveExistingFile(path: string): TFile | null {
+    const direct = this.app.vault.getAbstractFileByPath(path)
+    if (direct instanceof TFile) return direct
+    if (direct) return null // a folder (or other non-file) occupies the exact path
+    const lower = path.toLowerCase()
+    for (const f of this.app.vault.getFiles()) {
+      if (f.path.toLowerCase() === lower) return f
+    }
+    return null
   }
 
   private async ensureFolder(dir: string): Promise<void> {
