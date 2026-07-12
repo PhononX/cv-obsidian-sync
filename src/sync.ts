@@ -20,6 +20,29 @@ export interface SyncResult {
 const PAGE = 200
 const MAX_PAGES = 500 // safety cap on pagination loops
 
+// Ready-made Obsidian Bases view (core Bases plugin, 1.9+). Selects conversation notes by their
+// `grouping` property (only conversation notes have it, so voice memos are excluded), groups by
+// `date`, and sorts newest-first — an inbox-style "by date" table over the existing notes, no
+// file duplication. Written once via create-if-absent; users can refine it in the Bases GUI.
+const CONVERSATIONS_BASE = `filters:
+  or:
+    - 'grouping == "month"'
+    - 'grouping == "week"'
+    - 'grouping == "day"'
+views:
+  - type: table
+    name: Conversations by date
+    groupBy:
+      property: date
+      direction: DESC
+    order:
+      - conversation_name
+      - workspace_name
+      - period
+      - message_count
+      - last_message_at
+`
+
 export class CarbonVoiceSync {
   constructor(private plugin: CarbonVoiceSyncPlugin) {}
 
@@ -35,6 +58,7 @@ export class CarbonVoiceSync {
   // Forward incremental sync. First run only sets the baseline (no historical pull).
   async syncIncremental(): Promise<SyncResult> {
     const api = new CarbonVoiceAPI(this.settings.apiToken)
+    await this.ensureConversationsView()
     // Capture the baseline before fetching: any message updated during this run then gets
     // re-pulled next time rather than being skipped. Status changes bump last_updated_at, so
     // a message that goes `active` (transcript ready) after we saw it will resync on its own.
@@ -67,6 +91,7 @@ export class CarbonVoiceSync {
     voiceMemoWindow: HistoryWindow
   ): Promise<SyncResult> {
     const api = new CarbonVoiceAPI(this.settings.apiToken)
+    await this.ensureConversationsView()
     const convSince = this.windowToSince(conversationWindow)
     const memoSince = this.windowToSince(voiceMemoWindow)
     // Fetch once over the larger of the two windows, then filter each category by its own.
@@ -662,6 +687,13 @@ export class CarbonVoiceSync {
         }
       }
     }
+  }
+
+  // Writes the ready-made "Conversations by Date" Bases view into the sync folder once, so the
+  // by-date/recency table ships with the plugin. Create-if-absent: never overwrites, so a user's
+  // edits (or deletion) stick. Requires Obsidian's core Bases plugin to render.
+  private async ensureConversationsView(): Promise<void> {
+    await this.createIfAbsent(`${this.root()}/Conversations by Date.base`, CONVERSATIONS_BASE)
   }
 
   // Creates a file only if it doesn't already exist — never overwrites. Used for People/Workspace
