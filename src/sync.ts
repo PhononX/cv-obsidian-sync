@@ -38,6 +38,7 @@ views:
     order:
       - file.name
       - conversation_name
+      - conversation_note
       - workspace_name
       - message_count
       - last_message_at
@@ -384,6 +385,11 @@ export class CarbonVoiceSync {
       }
       if (this.settings.linkNotes) await this.ensureEntityNotes(channel)
       const folder = await this.resolveChannelFolder(channel, claimed)
+      // A per-conversation "home" note at the folder root: info up top, an embedded conversation-
+      // scoped Bases table below. It's the linkable stand-in for the folder (Obsidian can't link a
+      // folder directly) and each period note links back to it.
+      const indexBase = `${folder}/${sanitize(channelName(channel))}`
+      await this.ensureConversationIndex(channel, indexBase)
       for (const period of periods) {
         const msgs = (await this.fetchChannelPeriod(api, ch, period, grouping)).filter(
           m => !m.deleted_at && !isPending(m)
@@ -397,7 +403,7 @@ export class CarbonVoiceSync {
         const path = `${folder}/${periodFileLabel(period, grouping)}`
         await this.upsertFile(
           path,
-          this.buildConversationNote(channel, period, grouping, msgs, audioPaths)
+          this.buildConversationNote(channel, period, grouping, indexBase, msgs, audioPaths)
         )
         count++
       }
@@ -409,6 +415,7 @@ export class CarbonVoiceSync {
     channel: CarbonVoiceChannel,
     period: string,
     grouping: MessageGrouping,
+    indexBase: string,
     messages: CarbonVoiceMessage[],
     audioPaths: Map<string, string>
   ): string {
@@ -437,6 +444,9 @@ export class CarbonVoiceSync {
       `cv_conversation_id: ${channel.channel_guid}`,
       `conversation_link: https://carbonvoice.app/c/${channel.channel_guid}`,
       `conversation_name: ${yaml(title)}`,
+      // Link back to the conversation "home" note, so a by-date Bases row can jump to the whole
+      // conversation (the stand-in for its folder).
+      `conversation_note: ${yaml(`[[${indexBase}|${title}]]`)}`,
       `workspace_name: ${yaml(wsName)}`,
       `workspace_id: ${channel.workspace_guid}`,
     ]
@@ -695,6 +705,61 @@ export class CarbonVoiceSync {
   // edits (or deletion) stick. Requires Obsidian's core Bases plugin to render.
   private async ensureConversationsView(): Promise<void> {
     await this.createIfAbsent(`${this.root()}/Conversations by Date.base`, CONVERSATIONS_BASE)
+  }
+
+  // Writes a conversation "home" note at the folder root: identity/metadata up top, an embedded
+  // conversation-scoped Bases table below (its period notes, newest first). This is the linkable
+  // stand-in for the folder. Create-if-absent so user edits stick; the embedded table stays live
+  // since it queries the period notes rather than hard-coding them. `indexBase` has no extension.
+  private async ensureConversationIndex(
+    channel: CarbonVoiceChannel,
+    indexBase: string
+  ): Promise<void> {
+    const name = channelName(channel)
+    const wsName = channel.workspace_name ?? ''
+    const url = `https://carbonvoice.app/c/${channel.channel_guid}`
+    const lines = [
+      '---',
+      `cv_conversation_id: ${channel.channel_guid}`,
+      `conversation_name: ${yaml(name)}`,
+      `workspace_name: ${yaml(wsName)}`,
+      `workspace_id: ${channel.workspace_guid}`,
+      `conversation_link: ${url}`,
+      'tags: [carbon-voice, conversation]',
+      '---',
+      '',
+      `# ${name}`,
+      '',
+    ]
+    if (wsName) lines.push(`- **Workspace:** ${wsName}`)
+    lines.push(
+      `- [Open in Carbon Voice ↗](${url})`,
+      '',
+      '> Conversation home. The table below lists this conversation’s notes (grouped by month, week,',
+      '> or day per the sync setting), newest first — click one to open that period’s messages.',
+      '',
+      // Embedded Bases view (core Bases plugin). Scoped to this conversation by its id, and limited
+      // to period notes via `grouping` so the home note doesn't list itself.
+      '```base',
+      'filters:',
+      '  and:',
+      `    - 'cv_conversation_id == "${channel.channel_guid}"'`,
+      '    - or:',
+      `        - 'grouping == "month"'`,
+      `        - 'grouping == "week"'`,
+      `        - 'grouping == "day"'`,
+      'views:',
+      '  - type: table',
+      '    name: Messages by period',
+      '    order:',
+      '      - file.name',
+      '      - date',
+      '      - message_count',
+      '      - last_message_at',
+      '```',
+      '',
+    )
+    await this.createIfAbsent(`${indexBase}.md`, lines.join('\n'))
   }
 
   // Creates a file only if it doesn't already exist — never overwrites. Used for People/Workspace
