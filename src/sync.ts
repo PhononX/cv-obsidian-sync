@@ -155,6 +155,9 @@ export class CarbonVoiceSync {
     const workspaces = await this.fetchWorkspaceNames(api)
 
     let count = 0
+    // Tracks the note path each memo claimed this run, so two same-titled memos in one import
+    // don't fight over one file — the second is disambiguated instead of overwriting the first.
+    const claimed = new Map<string, string>()
     for (const m of live) {
       const transcript = messageTranscript(m)
       const summary = extractText(m, 'summary')
@@ -169,7 +172,8 @@ export class CarbonVoiceSync {
       }
       const audioPath =
         this.settings.audioMode === 'download' ? await this.ensureAudio(api, m) : null
-      const path = `${this.root()}/Voice Memos/${subpath}/${sanitize(title)}.md`
+      const basePath = `${this.root()}/Voice Memos/${subpath}/${sanitize(title)}.md`
+      const path = await this.resolveMemoNotePath(basePath, m, claimed)
       await this.upsertFile(
         path,
         this.buildVoiceMemoNote(m, subpath, title, transcript, summary, wsName, creatorName, audioPath)
@@ -177,6 +181,45 @@ export class CarbonVoiceSync {
       count++
     }
     return count
+  }
+
+  // Picks the on-disk note path for a memo. A memo keeps its clean title-based filename unless a
+  // *different* memo already owns that path (on disk from a past sync, or claimed earlier this
+  // run) — then a short message-id tag is appended so neither memo silently overwrites the other.
+  // The note's displayed title (frontmatter/H1) is unchanged; only the filename carries the tag.
+  // Identity is the memo id in frontmatter, so re-syncing the same memo reuses its file in place.
+  private async resolveMemoNotePath(
+    basePath: string,
+    m: CarbonVoiceMessage,
+    claimed: Map<string, string>
+  ): Promise<string> {
+    const base = normalizePath(basePath)
+    const owner = claimed.get(base) ?? (await this.memoIdAt(base))
+    let chosen = base
+    if (owner != null && owner !== m.message_id) {
+      const short = m.message_id.replace(/[^a-zA-Z0-9]/g, '').slice(0, 6) || m.message_id
+      chosen = normalizePath(base.replace(/\.md$/i, ` (${short}).md`))
+      // Astronomically unlikely, but if that tagged slot is taken by yet another memo, fall back
+      // to the full id — guaranteed unique.
+      const tagOwner = claimed.get(chosen) ?? (await this.memoIdAt(chosen))
+      if (tagOwner != null && tagOwner !== m.message_id) {
+        chosen = normalizePath(base.replace(/\.md$/i, ` (${m.message_id}).md`))
+      }
+    }
+    claimed.set(chosen, m.message_id)
+    return chosen
+  }
+
+  // The Carbon Voice memo id recorded in a note's frontmatter, or null if no note (or no id) lives
+  // at `path`. Uses the metadata cache when warm and only reads the file when it isn't — which
+  // happens at most on a genuine path collision, never on the common new-file / same-memo path.
+  private async memoIdAt(path: string): Promise<string | null> {
+    const f = this.app.vault.getAbstractFileByPath(path)
+    if (!(f instanceof TFile)) return null
+    const cached = this.app.metadataCache.getFileCache(f)?.frontmatter?.cv_memo_id
+    if (typeof cached === 'string') return cached
+    const match = (await this.app.vault.read(f)).match(/^cv_memo_id:\s*(\S+)/m)
+    return match ? match[1] : null
   }
 
   private memoSubpath(
