@@ -36,11 +36,12 @@ views:
       property: date
       direction: DESC
     order:
+      - file.name
       - conversation_name
       - workspace_name
-      - period
       - message_count
       - last_message_at
+      - conversation_link
 `
 
 export class CarbonVoiceSync {
