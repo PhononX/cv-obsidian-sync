@@ -324,7 +324,7 @@ export class CarbonVoiceSync {
           this.settings.audioMode === 'download'
             ? await this.collectAudio(api, msgs)
             : new Map<string, string>()
-        const path = `${this.root()}/Conversations/${sanitize(workspaceName(channel))}/${sanitize(channelName(channel))}/${month} Messages.md`
+        const path = `${this.root()}/Conversations/${sanitize(workspaceName(channel))}/${channelFolder(channel)}/${month} Messages.md`
         await this.upsertFile(path, this.buildConversationNote(channel, month, msgs, audioPaths))
         count++
       }
@@ -712,6 +712,13 @@ export class CarbonVoiceSync {
 
 function channelName(c: CarbonVoiceChannel): string {
   return c.channel_name?.trim() || `Conversation ${c.channel_guid.slice(0, 8)}`
+}
+
+// Folder name for a channel: its sanitized name plus a short channel-guid tag so two different
+// channels that share a workspace + name never collapse into one folder. The guid is stable, so
+// re-syncing a channel keeps hitting the same folder.
+function channelFolder(c: CarbonVoiceChannel): string {
+  return `${sanitize(channelName(c))} (${c.channel_guid.slice(0, 8)})`
 }
 
 function workspaceName(c: CarbonVoiceChannel): string {
