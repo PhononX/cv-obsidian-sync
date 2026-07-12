@@ -1,4 +1,4 @@
-import { TFile, normalizePath } from 'obsidian'
+import { TFile, TFolder, normalizePath } from 'obsidian'
 import type CarbonVoiceSyncPlugin from './main'
 import { CarbonVoiceAPI } from './api'
 import type {
@@ -222,6 +222,42 @@ export class CarbonVoiceSync {
     return match ? match[1] : null
   }
 
+  // Picks the folder for a channel's month notes. A channel keeps its clean name-based folder
+  // unless a *different* channel already owns it (on disk from a past sync, or claimed earlier
+  // this run) — then a short channel-guid tag is appended. Identity is cv_conversation_id in the
+  // month notes, so re-syncing the same channel reuses its folder in place.
+  private async resolveChannelFolder(
+    channel: CarbonVoiceChannel,
+    claimed: Map<string, string>
+  ): Promise<string> {
+    const base = normalizePath(
+      `${this.root()}/Conversations/${sanitize(workspaceName(channel))}/${sanitize(channelName(channel))}`
+    )
+    const owner = claimed.get(base) ?? (await this.channelIdAt(base))
+    let chosen = base
+    if (owner != null && owner !== channel.channel_guid) {
+      chosen = normalizePath(`${base} (${channel.channel_guid.slice(0, 8)})`)
+    }
+    claimed.set(chosen, channel.channel_guid)
+    return chosen
+  }
+
+  // The cv_conversation_id owning a channel folder, read from any month note inside it, or null if
+  // the folder is absent/empty. Uses the metadata cache when warm and only reads a file when it
+  // isn't — so the common same-channel / new-folder path stays I/O-free.
+  private async channelIdAt(folderPath: string): Promise<string | null> {
+    const folder = this.app.vault.getAbstractFileByPath(folderPath)
+    if (!(folder instanceof TFolder)) return null
+    for (const child of folder.children) {
+      if (!(child instanceof TFile) || child.extension !== 'md') continue
+      const cached = this.app.metadataCache.getFileCache(child)?.frontmatter?.cv_conversation_id
+      if (typeof cached === 'string') return cached
+      const match = (await this.app.vault.read(child)).match(/^cv_conversation_id:\s*(\S+)/m)
+      if (match) return match[1]
+    }
+    return null
+  }
+
   private memoSubpath(
     m: CarbonVoiceMessage,
     folders: Map<string, CarbonVoiceFolder>,
@@ -307,6 +343,9 @@ export class CarbonVoiceSync {
 
     let count = 0
     const channelCache = new Map<string, CarbonVoiceChannel>()
+    // Tracks the folder each channel claimed this run, so two channels sharing a workspace + name
+    // don't write into one folder — the second is disambiguated instead of overwriting the first.
+    const claimed = new Map<string, string>()
     for (const [ch, months] of touched) {
       let channel = channelCache.get(ch)
       if (!channel) {
@@ -314,6 +353,7 @@ export class CarbonVoiceSync {
         channelCache.set(ch, channel)
       }
       if (this.settings.linkNotes) await this.ensureEntityNotes(channel)
+      const folder = await this.resolveChannelFolder(channel, claimed)
       for (const month of months) {
         const msgs = (await this.fetchChannelMonth(api, ch, month)).filter(
           m => !m.deleted_at && !isPending(m)
@@ -324,7 +364,7 @@ export class CarbonVoiceSync {
           this.settings.audioMode === 'download'
             ? await this.collectAudio(api, msgs)
             : new Map<string, string>()
-        const path = `${this.root()}/Conversations/${sanitize(workspaceName(channel))}/${channelFolder(channel)}/${month} Messages.md`
+        const path = `${folder}/${month} Messages.md`
         await this.upsertFile(path, this.buildConversationNote(channel, month, msgs, audioPaths))
         count++
       }
@@ -712,13 +752,6 @@ export class CarbonVoiceSync {
 
 function channelName(c: CarbonVoiceChannel): string {
   return c.channel_name?.trim() || `Conversation ${c.channel_guid.slice(0, 8)}`
-}
-
-// Folder name for a channel: its sanitized name plus a short channel-guid tag so two different
-// channels that share a workspace + name never collapse into one folder. The guid is stable, so
-// re-syncing a channel keeps hitting the same folder.
-function channelFolder(c: CarbonVoiceChannel): string {
-  return `${sanitize(channelName(c))} (${c.channel_guid.slice(0, 8)})`
 }
 
 function workspaceName(c: CarbonVoiceChannel): string {
