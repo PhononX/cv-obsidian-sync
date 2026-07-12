@@ -6,6 +6,7 @@ import type {
   CarbonVoiceChannel,
   CarbonVoiceFolder,
   HistoryWindow,
+  MessageGrouping,
 } from './types'
 import { ASYNC_MEETING_PREFIX } from './types'
 import { formatTranscript } from './transcript-format'
@@ -113,13 +114,15 @@ export class CarbonVoiceSync {
     return [...out.values()]
   }
 
-  // A single channel's messages within one YYYY-MM month, paging older from the month end.
-  private async fetchChannelMonth(
+  // A single channel's messages within one grouping period (month / week / day), paging older
+  // from the period end.
+  private async fetchChannelPeriod(
     api: CarbonVoiceAPI,
     channelGuid: string,
-    monthKey: string
+    periodKey: string,
+    grouping: MessageGrouping
   ): Promise<CarbonVoiceMessage[]> {
-    const { start, end } = monthBounds(monthKey)
+    const { start, end } = periodBounds(periodKey, grouping)
     const out = new Map<string, CarbonVoiceMessage>()
     let cursor = end
     for (let i = 0; i < MAX_PAGES; i++) {
@@ -331,13 +334,14 @@ export class CarbonVoiceSync {
     convMsgs: CarbonVoiceMessage[]
   ): Promise<number> {
     const live = convMsgs.filter(m => !m.deleted_at && !isPending(m))
-    // Which (channel, month) files were touched?
+    const grouping = this.settings.messageGrouping
+    // Which (channel, period) files were touched? A period is a month, week, or day per the setting.
     const touched = new Map<string, Set<string>>()
     for (const m of live) {
-      const month = m.created_at.slice(0, 7)
+      const period = periodKey(m.created_at, grouping)
       for (const ch of m.channel_ids) {
         if (!touched.has(ch)) touched.set(ch, new Set())
-        touched.get(ch)!.add(month)
+        touched.get(ch)!.add(period)
       }
     }
 
@@ -346,7 +350,7 @@ export class CarbonVoiceSync {
     // Tracks the folder each channel claimed this run, so two channels sharing a workspace + name
     // don't write into one folder — the second is disambiguated instead of overwriting the first.
     const claimed = new Map<string, string>()
-    for (const [ch, months] of touched) {
+    for (const [ch, periods] of touched) {
       let channel = channelCache.get(ch)
       if (!channel) {
         channel = await api.getChannel(ch)
@@ -354,8 +358,8 @@ export class CarbonVoiceSync {
       }
       if (this.settings.linkNotes) await this.ensureEntityNotes(channel)
       const folder = await this.resolveChannelFolder(channel, claimed)
-      for (const month of months) {
-        const msgs = (await this.fetchChannelMonth(api, ch, month)).filter(
+      for (const period of periods) {
+        const msgs = (await this.fetchChannelPeriod(api, ch, period, grouping)).filter(
           m => !m.deleted_at && !isPending(m)
         )
         if (msgs.length === 0) continue
@@ -364,8 +368,11 @@ export class CarbonVoiceSync {
           this.settings.audioMode === 'download'
             ? await this.collectAudio(api, msgs)
             : new Map<string, string>()
-        const path = `${folder}/${month} Messages.md`
-        await this.upsertFile(path, this.buildConversationNote(channel, month, msgs, audioPaths))
+        const path = `${folder}/${periodFileLabel(period, grouping)}`
+        await this.upsertFile(
+          path,
+          this.buildConversationNote(channel, period, grouping, msgs, audioPaths)
+        )
         count++
       }
     }
@@ -374,7 +381,8 @@ export class CarbonVoiceSync {
 
   private buildConversationNote(
     channel: CarbonVoiceChannel,
-    monthKey: string,
+    period: string,
+    grouping: MessageGrouping,
     messages: CarbonVoiceMessage[],
     audioPaths: Map<string, string>
   ): string {
@@ -397,13 +405,14 @@ export class CarbonVoiceSync {
       `workspace_id: ${channel.workspace_guid}`,
     ]
     fm.push(
-      `month: ${monthKey}`,
+      `period: ${period}`,
+      `grouping: ${grouping}`,
       `participants: [${participantsFm.map(yaml).join(', ')}]`,
       'tags: [carbon-voice]',
       '---',
       ''
     )
-    const body: string[] = [`# ${title} — ${formatMonth(monthKey)}`, '']
+    const body: string[] = [`# ${title} — ${formatPeriod(period, grouping)}`, '']
 
     if (this.settings.includeTranscripts) {
       body.push('## Messages', '')
@@ -837,20 +846,68 @@ function yaml(value: string): string {
   return value
 }
 
-function monthBounds(monthKey: string): { start: string; end: string } {
-  const [y, m] = monthKey.split('-').map(Number)
-  const start = new Date(Date.UTC(y, m - 1, 1))
-  const end = new Date(Date.UTC(m === 12 ? y + 1 : y, m === 12 ? 0 : m, 1))
+// The grouping key a message's timestamp falls into (all UTC): "YYYY-MM" for month, the Monday
+// date "YYYY-MM-DD" for week, or "YYYY-MM-DD" for day.
+function periodKey(iso: string, grouping: MessageGrouping): string {
+  switch (grouping) {
+    case 'day':
+      return iso.slice(0, 10)
+    case 'week':
+      return weekStartKey(iso)
+    default:
+      return iso.slice(0, 7)
+  }
+}
+
+// The Monday (UTC) that starts the ISO week containing `iso`, as "YYYY-MM-DD".
+function weekStartKey(iso: string): string {
+  const d = new Date(iso)
+  const dow = d.getUTCDay() // 0=Sun … 6=Sat
+  const backToMonday = dow === 0 ? 6 : dow - 1
+  const monday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - backToMonday))
+  return monday.toISOString().slice(0, 10)
+}
+
+// Half-open [start, end) UTC bounds for a period key under the active grouping.
+function periodBounds(key: string, grouping: MessageGrouping): { start: string; end: string } {
+  if (grouping === 'month') {
+    const [y, m] = key.split('-').map(Number)
+    const start = new Date(Date.UTC(y, m - 1, 1))
+    const end = new Date(Date.UTC(m === 12 ? y + 1 : y, m === 12 ? 0 : m, 1))
+    return { start: start.toISOString(), end: end.toISOString() }
+  }
+  // Day and week both key off a calendar date; Date.UTC normalises day overflow past month/year.
+  const [y, m, d] = key.split('-').map(Number)
+  const span = grouping === 'week' ? 7 : 1
+  const start = new Date(Date.UTC(y, m - 1, d))
+  const end = new Date(Date.UTC(y, m - 1, d + span))
   return { start: start.toISOString(), end: end.toISOString() }
 }
 
-function formatMonth(monthKey: string): string {
-  const [y, m] = monthKey.split('-').map(Number)
-  return new Date(Date.UTC(y, m - 1, 1)).toLocaleString('en-US', {
+// Filename for a period's note. Month/day are just the key; week adds a "Week" marker so a week
+// file never collides with the same-dated day file.
+function periodFileLabel(key: string, grouping: MessageGrouping): string {
+  return grouping === 'week' ? `${key} Week Messages.md` : `${key} Messages.md`
+}
+
+// Human heading for a period: "July 2026", "Week of July 6, 2026", or "July 6, 2026".
+function formatPeriod(key: string, grouping: MessageGrouping): string {
+  if (grouping === 'month') {
+    const [y, m] = key.split('-').map(Number)
+    return new Date(Date.UTC(y, m - 1, 1)).toLocaleString('en-US', {
+      month: 'long',
+      year: 'numeric',
+      timeZone: 'UTC',
+    })
+  }
+  const [y, m, d] = key.split('-').map(Number)
+  const full = new Date(Date.UTC(y, m - 1, d)).toLocaleString('en-US', {
     month: 'long',
+    day: 'numeric',
     year: 'numeric',
     timeZone: 'UTC',
   })
+  return grouping === 'week' ? `Week of ${full}` : full
 }
 
 function formatDayShort(iso: string): string {
