@@ -448,7 +448,17 @@ export class CarbonVoiceSync {
           ''
         )
         body.push(...this.audioBlock(m, audioPaths.get(m.message_id) ?? null))
-        body.push(`<sub><a href="${url}">Open in Carbon Voice ↗</a></sub>`, '', '---', '')
+        // Precise UTC timestamp (searchable with ⌘-Shift-F, unlike the local heading) plus a
+        // stable block id derived from the message id, so a single message can be deep-linked or
+        // bookmarked: [[<period> Messages#^cv-<id>]]. The id is deterministic, so it survives
+        // re-syncs; Obsidian hides both the ^anchor and the <sub> chrome in reading view.
+        const stamp = messageStamp(m.created_at)
+        body.push(
+          `<sub>🕒 ${stamp} · <a href="${url}">Open in Carbon Voice ↗</a></sub> ^cv-${blockAnchor(m.message_id)}`,
+          '',
+          '---',
+          ''
+        )
       }
     }
 
@@ -925,6 +935,20 @@ function formatPeriod(key: string, grouping: MessageGrouping): string {
 
 function formatDayShort(iso: string): string {
   return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric' })
+}
+
+// Minute-precision UTC stamp for a message's metadata line, e.g. "2026-07-12T15:04Z". Unlike the
+// locale-formatted heading time, this is deterministic text that an exact date/time search hits.
+function messageStamp(iso: string): string {
+  return `${iso.slice(0, 16)}Z`
+}
+
+// A safe, stable Obsidian block-id fragment from a message id: strip non-alphanumerics (block ids
+// allow only [A-Za-z0-9-]) and keep a short, collision-free-within-a-note slice. Deterministic, so
+// the anchor is identical across re-syncs and existing deep links keep resolving.
+function blockAnchor(messageId: string): string {
+  const cleaned = messageId.replace(/[^a-zA-Z0-9]/g, '')
+  return cleaned.slice(0, 12) || 'msg'
 }
 
 function formatTime(iso: string): string {
