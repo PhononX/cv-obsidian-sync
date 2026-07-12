@@ -396,6 +396,16 @@ export class CarbonVoiceSync {
     const wsName = channel.workspace_name ?? ''
     const participantsFm = participants.map(p => (link ? this.personLink(p) : p))
 
+    // Date/recency fields for by-date views (Bases/Dataview): `date` is the period's first day
+    // (the day itself for day-grouping, the Monday for week, the 1st for month); `last_message_at`
+    // is the newest message in the note — the "most recently touched" key an inbox-style view
+    // sorts on so the freshest conversation floats to the top.
+    const noteDate = periodBounds(period, grouping).start.slice(0, 10)
+    const lastMessageAt = messages.reduce(
+      (max, m) => (m.created_at > max ? m.created_at : max),
+      messages[0]?.created_at ?? `${noteDate}T00:00:00.000Z`
+    )
+
     const fm = [
       '---',
       `cv_conversation_id: ${channel.channel_guid}`,
@@ -407,6 +417,9 @@ export class CarbonVoiceSync {
     fm.push(
       `period: ${period}`,
       `grouping: ${grouping}`,
+      `date: ${noteDate}`,
+      `last_message_at: ${lastMessageAt}`,
+      `message_count: ${messages.length}`,
       `participants: [${participantsFm.map(yaml).join(', ')}]`,
       'tags: [carbon-voice]',
       '---',
