@@ -1,4 +1,4 @@
-import { Notice, Plugin } from 'obsidian'
+import { Notice, Plugin, WorkspaceLeaf } from 'obsidian'
 import { CarbonVoiceSettings, DEFAULT_SETTINGS } from './types'
 import { CarbonVoiceSettingTab } from './settings'
 import { CarbonVoiceSync } from './sync'
@@ -114,7 +114,13 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
   // runSync itself no-ops if a sync is already running).
   async activateView(): Promise<void> {
     const { workspace } = this.app
-    let leaf = workspace.getLeavesOfType(CARBON_VOICE_VIEW)[0]
+    // Reuse a panel already in the MAIN area; close any leftover that lives in a sidebar (e.g. a
+    // stale right-sidebar leaf restored from an earlier layout) so the mic always lands center.
+    let leaf: WorkspaceLeaf | null = null
+    for (const existing of workspace.getLeavesOfType(CARBON_VOICE_VIEW)) {
+      if (existing.getRoot() === workspace.rootSplit) leaf = existing
+      else existing.detach()
+    }
     if (!leaf) {
       leaf = workspace.getLeaf('tab')
       await leaf.setViewState({ type: CARBON_VOICE_VIEW, active: true })
