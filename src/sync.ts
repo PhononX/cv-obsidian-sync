@@ -345,6 +345,7 @@ export class CarbonVoiceSync {
       `cv_folder: ${yaml(subpath)}`,
       `title: ${yaml(title)}`,
       `date: ${m.created_at.slice(0, 10)}`,
+      `time: ${yaml(m.created_at.slice(11, 16))}`,
       `duration: ${durationSec}`,
     ]
     const memoName = m.name?.trim()
