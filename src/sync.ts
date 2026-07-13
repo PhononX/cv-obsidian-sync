@@ -702,11 +702,25 @@ export class CarbonVoiceSync {
   }
 
   // Finds the note occupying `path` on a case-insensitive filesystem when the exact-case index
-  // lookup missed. Returns null when no file (folders don't count) matches.
+  // lookup missed. The on-disk collision can differ in case at any segment (folder or leaf), so we
+  // descend the tree one level at a time, matching each segment against the current folder's
+  // children case-insensitively. This resolves the same file the old whole-vault scan did without
+  // ever enumerating the entire vault — each step only inspects the children of the folder we're
+  // already inside. Returns null when no note (folders don't count) occupies the path.
   private resolveCaseInsensitive(path: string): TFile | null {
-    const lower = path.toLowerCase()
-    for (const f of this.app.vault.getFiles()) {
-      if (f.path.toLowerCase() === lower) return f
+    const segments = normalizePath(path).split('/')
+    let node: TFolder = this.app.vault.getRoot()
+    for (let i = 0; i < segments.length; i++) {
+      const wanted = segments[i].toLowerCase()
+      const last = i === segments.length - 1
+      const match = node.children.find((c) =>
+        last
+          ? c instanceof TFile && c.name.toLowerCase() === wanted
+          : c instanceof TFolder && c.name.toLowerCase() === wanted,
+      )
+      if (!match) return null
+      if (last) return match as TFile
+      node = match as TFolder
     }
     return null
   }
