@@ -456,6 +456,11 @@ export class CarbonVoiceSync {
       `last_message_at: ${lastMessageAt}`,
       `message_count: ${messages.length}`,
       `participants: [${participantsFm.map(yaml).join(', ')}]`,
+      // Plain-text mirror of `participants` (which holds wiki-links). Each People note embeds a Base
+      // that filters on this with `participant_names.contains("<name>")` — string matching sidesteps
+      // the link-resolution edge cases a list-of-links filter would hit. The links above stay for the
+      // graph and backlinks.
+      `participant_names: [${participants.map(yaml).join(', ')}]`,
       'tags: [carbon-voice]',
       '---',
       ''
@@ -792,6 +797,12 @@ export class CarbonVoiceSync {
 
   private async ensurePersonNote(name: string): Promise<void> {
     const path = `${this.root()}/People/${sanitize(name)}.md`
+    // Bases filter string literal: escape backslashes then double-quotes for the inner
+    // `contains("…")` argument, then double single-quotes for the surrounding YAML scalar. Names
+    // like O'Brien or 21" Monitor otherwise break the embedded block.
+    const filter = `participant_names.contains("${name
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"')}")`.replace(/'/g, "''")
     await this.createIfAbsent(
       path,
       [
@@ -802,8 +813,35 @@ export class CarbonVoiceSync {
         '',
         `# ${name}`,
         '',
-        '> Auto-created by Carbon Voice Sync. The backlinks pane lists every conversation and',
-        '> voice memo this person appears in.',
+        '> Auto-created by Carbon Voice Sync. Add your own notes here — a later sync never overwrites',
+        '> this file. The table below lists every conversation this person takes part in, newest first;',
+        '> the backlinks pane also catches voice memos they appear in.',
+        '',
+        // Embedded Bases view (core Bases plugin, 1.9+). Scoped to this person via the plain-text
+        // `participant_names` on conversation notes, and to period notes via `grouping` so conversation
+        // "home" notes and voice memos don't show up. Queries live, so new conversations appear here
+        // automatically without rewriting this note.
+        '```base',
+        'filters:',
+        '  and:',
+        `    - '${filter}'`,
+        '    - or:',
+        `        - 'grouping == "month"'`,
+        `        - 'grouping == "week"'`,
+        `        - 'grouping == "day"'`,
+        'views:',
+        '  - type: table',
+        '    name: Conversations',
+        '    sort:',
+        '      - property: last_message_at',
+        '        direction: DESC',
+        '    order:',
+        '      - conversation',
+        '      - workspace_name',
+        '      - date',
+        '      - message_count',
+        '      - last_message_at',
+        '```',
         '',
       ].join('\n')
     )
