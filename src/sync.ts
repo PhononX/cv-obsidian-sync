@@ -155,7 +155,12 @@ export class CarbonVoiceSync {
         const ts = m.last_updated_at || m.created_at
         if (ts > newest) newest = ts
       }
-      if (newest === cursor || page.length < PAGE) break
+      // Advance by the newest timestamp seen and keep paging. A short page (fewer than PAGE rows)
+      // is NOT end-of-data — /v3/messages/recent caps its page size below our requested limit, so
+      // stopping on a short page would drop everything past the first page (the oldest slice for a
+      // `newer` scan), which is exactly what made a larger history window return fewer memos. Stop
+      // only when a page is empty or the cursor can't move forward.
+      if (newest === cursor) break
       cursor = newest
     }
     return [...out.values()]
@@ -186,7 +191,10 @@ export class CarbonVoiceSync {
         if (m.created_at >= start && m.created_at < end) out.set(m.message_id, m)
         if (m.created_at < oldest) oldest = m.created_at
       }
-      if (oldest < start || oldest === cursor || page.length < PAGE) break
+      // Stop once we've paged past the period start or the cursor can't move older. A short page
+      // (fewer than PAGE rows) is NOT end-of-data — the endpoint caps page size below our requested
+      // limit — so we keep paging until a real terminator trips instead of dropping older messages.
+      if (oldest < start || oldest === cursor) break
       cursor = oldest
     }
     return [...out.values()]
