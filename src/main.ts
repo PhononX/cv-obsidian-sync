@@ -2,6 +2,7 @@ import { Notice, Plugin, WorkspaceLeaf } from 'obsidian'
 import { CarbonVoiceSettings, DEFAULT_SETTINGS } from './types'
 import { CarbonVoiceSettingTab } from './settings'
 import { CarbonVoiceSync } from './sync'
+import type { SyncProgress } from './sync'
 import { CarbonVoiceView, CARBON_VOICE_VIEW } from './view'
 
 export default class CarbonVoiceSyncPlugin extends Plugin {
@@ -58,7 +59,9 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
     this.isSyncing = true
     const notice = new Notice('Carbon Voice: Syncing…', 0)
     try {
-      const res = await this.sync.syncIncremental()
+      const res = await this.sync.syncIncremental(p =>
+        notice.setMessage(progressMessage('Carbon Voice: Syncing…', p))
+      )
       notice.hide()
       if (res.firstRun) {
         new Notice(
@@ -93,7 +96,8 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
     try {
       const res = await this.sync.importHistory(
         this.settings.conversationHistoryWindow,
-        this.settings.voiceMemoHistoryWindow
+        this.settings.voiceMemoHistoryWindow,
+        p => notice.setMessage(progressMessage('Carbon Voice: Importing…', p))
       )
       notice.hide()
       new Notice(
@@ -181,4 +185,13 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : 'unknown error'
+}
+
+// Toast text for a live sync/import. During the fetch phase we can only show how many messages
+// have come back; once notes start saving we show the running per-category counts.
+function progressMessage(prefix: string, p: SyncProgress): string {
+  if (p.phase === 'fetching') {
+    return `${prefix} fetched ${p.fetched} message${p.fetched === 1 ? '' : 's'}…`
+  }
+  return `${prefix} ${p.voiceMemos} voice memo(s), ${p.conversations} conversation file(s)…`
 }

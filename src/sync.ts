@@ -17,6 +17,16 @@ export interface SyncResult {
   voiceMemos: number // voice memo notes written
 }
 
+// Live progress reported to the caller so a toast can show work as it happens. `fetching` covers
+// the message pull (only `fetched` is meaningful then); `writing` covers note creation, where the
+// running `conversations` / `voiceMemos` counts climb as files are saved.
+export interface SyncProgress {
+  phase: 'fetching' | 'writing'
+  fetched: number
+  conversations: number
+  voiceMemos: number
+}
+
 const PAGE = 50
 const MAX_PAGES = 500 // safety cap on pagination loops
 
@@ -78,7 +88,7 @@ export class CarbonVoiceSync {
   // ── Public entry points ─────────────────────────────────────────────────
 
   // Forward incremental sync. First run only sets the baseline (no historical pull).
-  async syncIncremental(): Promise<SyncResult> {
+  async syncIncremental(onProgress?: (p: SyncProgress) => void): Promise<SyncResult> {
     const api = new CarbonVoiceAPI(this.settings.apiToken)
     await this.ensureBaseViews()
     // Capture the baseline before fetching: any message updated during this run then gets
@@ -93,12 +103,23 @@ export class CarbonVoiceSync {
       return { firstRun: true, conversations: 0, voiceMemos: 0 }
     }
 
-    const messages = await this.collectMessagesSince(api, since)
+    const progress: SyncProgress = { phase: 'fetching', fetched: 0, conversations: 0, voiceMemos: 0 }
+    const messages = await this.collectMessagesSince(api, since, n => {
+      progress.fetched = n
+      onProgress?.(progress)
+    })
+    progress.phase = 'writing'
     const memos = messages.filter(m => this.isVoiceMemo(m) && this.memoInScope(m))
     const convMsgs = await this.selectConversationMessages(api, messages)
 
-    const voiceMemos = await this.processVoiceMemos(api, memos)
-    const conversations = await this.processConversations(api, convMsgs)
+    const voiceMemos = await this.processVoiceMemos(api, memos, () => {
+      progress.voiceMemos++
+      onProgress?.(progress)
+    })
+    const conversations = await this.processConversations(api, convMsgs, () => {
+      progress.conversations++
+      onProgress?.(progress)
+    })
 
     this.settings.lastSyncTimestamp = startedAt
     await this.plugin.saveSettings()
@@ -110,7 +131,8 @@ export class CarbonVoiceSync {
   // Each category is filtered to its own window. Does not touch the incremental baseline.
   async importHistory(
     conversationWindow: HistoryWindow,
-    voiceMemoWindow: HistoryWindow
+    voiceMemoWindow: HistoryWindow,
+    onProgress?: (p: SyncProgress) => void
   ): Promise<SyncResult> {
     const api = new CarbonVoiceAPI(this.settings.apiToken)
     await this.ensureBaseViews()
@@ -118,16 +140,27 @@ export class CarbonVoiceSync {
     const memoSince = this.windowToSince(voiceMemoWindow)
     // Fetch once over the larger of the two windows, then filter each category by its own.
     const earliest = convSince < memoSince ? convSince : memoSince
-    const messages = await this.collectMessagesSince(api, earliest)
+    const progress: SyncProgress = { phase: 'fetching', fetched: 0, conversations: 0, voiceMemos: 0 }
+    const messages = await this.collectMessagesSince(api, earliest, n => {
+      progress.fetched = n
+      onProgress?.(progress)
+    })
+    progress.phase = 'writing'
 
     const memoMsgs = messages.filter(
       m => m.created_at >= memoSince && this.isVoiceMemo(m) && this.memoInScope(m)
     )
-    const voiceMemos = await this.processVoiceMemos(api, memoMsgs)
+    const voiceMemos = await this.processVoiceMemos(api, memoMsgs, () => {
+      progress.voiceMemos++
+      onProgress?.(progress)
+    })
 
     const convCandidates = messages.filter(m => m.created_at >= convSince)
     const convMsgs = await this.selectConversationMessages(api, convCandidates)
-    const conversations = await this.processConversations(api, convMsgs)
+    const conversations = await this.processConversations(api, convMsgs, () => {
+      progress.conversations++
+      onProgress?.(progress)
+    })
 
     return { firstRun: false, conversations, voiceMemos }
   }
@@ -137,7 +170,8 @@ export class CarbonVoiceSync {
   // All messages updated at/after `sinceIso`, paging forward by last_updated_at.
   private async collectMessagesSince(
     api: CarbonVoiceAPI,
-    sinceIso: string
+    sinceIso: string,
+    onFetch?: (total: number) => void
   ): Promise<CarbonVoiceMessage[]> {
     const out = new Map<string, CarbonVoiceMessage>()
     let cursor = sinceIso
@@ -155,6 +189,7 @@ export class CarbonVoiceSync {
         const ts = m.last_updated_at || m.created_at
         if (ts > newest) newest = ts
       }
+      onFetch?.(out.size)
       // Advance by the newest timestamp seen and keep paging. A short page (fewer than PAGE rows)
       // is NOT end-of-data — /v3/messages/recent caps its page size below our requested limit, so
       // stopping on a short page would drop everything past the first page (the oldest slice for a
@@ -204,7 +239,8 @@ export class CarbonVoiceSync {
 
   private async processVoiceMemos(
     api: CarbonVoiceAPI,
-    memos: CarbonVoiceMessage[]
+    memos: CarbonVoiceMessage[],
+    onTick?: () => void
   ): Promise<number> {
     const live = memos.filter(m => !m.deleted_at && !isPending(m))
     if (live.length === 0) return 0
@@ -237,6 +273,7 @@ export class CarbonVoiceSync {
         this.buildVoiceMemoNote(m, subpath, title, transcript, summary, wsName, creatorName, audioPath)
       )
       count++
+      onTick?.()
     }
     return count
   }
@@ -390,7 +427,8 @@ export class CarbonVoiceSync {
 
   private async processConversations(
     api: CarbonVoiceAPI,
-    convMsgs: CarbonVoiceMessage[]
+    convMsgs: CarbonVoiceMessage[],
+    onTick?: () => void
   ): Promise<number> {
     const live = convMsgs.filter(m => !m.deleted_at && !isPending(m))
     const grouping = this.settings.messageGrouping
@@ -438,6 +476,7 @@ export class CarbonVoiceSync {
           this.buildConversationNote(channel, period, grouping, indexBase, msgs, audioPaths)
         )
         count++
+        onTick?.()
       }
     }
     return count
