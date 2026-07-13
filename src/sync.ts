@@ -43,7 +43,7 @@ views:
       - conversation_link
 `
 
-// Ready-made "All Voice Memos" Bases view, written into the Voice Memos folder. Selects voice-memo
+// Ready-made "All Voice Memos" Bases view, written at the sync root. Selects voice-memo
 // notes by their tag and lists them newest-first with the memo's key fields. `file.name` is the
 // clickable column that opens the memo note; `memo_link` is the external Carbon Voice deeplink.
 const VOICE_MEMOS_BASE = `filters:
@@ -726,13 +726,13 @@ export class CarbonVoiceSync {
     }
   }
 
-  // Writes the ready-made Bases views into the vault once — "Conversations by Date" at the sync
-  // root and "All Voice Memos" inside the Voice Memos folder — so they ship with the plugin.
+  // Writes the ready-made Bases views into the vault once — "Conversations by Date" and
+  // "All Voice Memos" both at the sync root — so they ship with the plugin.
   // Create-if-absent: never overwrites, so a user's edits (or deletion) stick. Requires Obsidian's
   // core Bases plugin to render.
   private async ensureBaseViews(): Promise<void> {
     await this.createIfAbsent(`${this.root()}/Conversations by Date.base`, CONVERSATIONS_BASE)
-    await this.createIfAbsent(`${this.root()}/Voice Memos/All Voice Memos.base`, VOICE_MEMOS_BASE)
+    await this.createIfAbsent(`${this.root()}/All Voice Memos.base`, VOICE_MEMOS_BASE)
   }
 
   // Writes a conversation "home" note at the folder root: identity/metadata up top, an embedded
