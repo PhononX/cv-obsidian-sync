@@ -12,6 +12,10 @@ on:
 
 permissions:
   contents: write
+  # Required for actions/attest-build-provenance to mint provenance
+  # attestations and sign them via Sigstore.
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -28,6 +32,16 @@ jobs:
 
       - name: Build plugin
         run: npm run build
+
+      - name: Attest build provenance for release assets
+        uses: actions/attest-build-provenance@v2
+        with:
+          # Attest the built bundle and stylesheet so users can
+          # cryptographically verify these assets were produced by this
+          # workflow from this repository (gh attestation verify <file>).
+          subject-path: |
+            main.js
+            styles.css
 
       - name: Verify tag matches manifest version
         run: |
