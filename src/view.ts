@@ -58,9 +58,12 @@ export class CarbonVoiceView extends ItemView {
           })
       )
 
-    new Setting(contentEl).setName('Settings').addButton(btn =>
-      btn.setButtonText('Open').onClick(() => this.plugin.openSettings())
-    )
+    new Setting(contentEl)
+      .setName('Settings')
+      .setDesc('Adjust what gets synced. Import History.')
+      .addButton(btn =>
+        btn.setButtonText('Open').onClick(() => this.plugin.openSettings())
+      )
 
     new Setting(contentEl)
       .setName('Conversations by date')
@@ -78,7 +81,7 @@ export class CarbonVoiceView extends ItemView {
       .addButton(btn =>
         btn.setButtonText('Open').onClick(() => {
           const root = s.syncFolder.trim() || 'Carbon Voice'
-          void this.app.workspace.openLinkText(`${root}/Voice Memos/All Voice Memos.base`, '', true)
+          void this.app.workspace.openLinkText(`${root}/All Voice Memos.base`, '', true)
         })
       )
   }

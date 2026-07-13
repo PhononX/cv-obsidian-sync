@@ -17,7 +17,17 @@ export interface SyncResult {
   voiceMemos: number // voice memo notes written
 }
 
-const PAGE = 200
+// Live progress reported to the caller so a toast can show work as it happens. `fetching` covers
+// the message pull (only `fetched` is meaningful then); `writing` covers note creation, where the
+// running `conversations` / `voiceMemos` counts climb as files are saved.
+export interface SyncProgress {
+  phase: 'fetching' | 'writing'
+  fetched: number
+  conversations: number
+  voiceMemos: number
+}
+
+const PAGE = 50
 const MAX_PAGES = 500 // safety cap on pagination loops
 
 // Ready-made Obsidian Bases view (core Bases plugin, 1.9+). Selects conversation notes by their
@@ -43,7 +53,7 @@ views:
       - conversation_link
 `
 
-// Ready-made "All Voice Memos" Bases view, written into the Voice Memos folder. Selects voice-memo
+// Ready-made "All Voice Memos" Bases view, written at the sync root. Selects voice-memo
 // notes by their tag and lists them newest-first with the memo's key fields. `file.name` is the
 // clickable column that opens the memo note; `memo_link` is the external Carbon Voice deeplink.
 const VOICE_MEMOS_BASE = `filters:
@@ -58,7 +68,7 @@ views:
       - cv_folder
       - date
       - duration
-      - title
+      - summary
       - memo_link
     sort:
       - property: date
@@ -78,7 +88,7 @@ export class CarbonVoiceSync {
   // ── Public entry points ─────────────────────────────────────────────────
 
   // Forward incremental sync. First run only sets the baseline (no historical pull).
-  async syncIncremental(): Promise<SyncResult> {
+  async syncIncremental(onProgress?: (p: SyncProgress) => void): Promise<SyncResult> {
     const api = new CarbonVoiceAPI(this.settings.apiToken)
     await this.ensureBaseViews()
     // Capture the baseline before fetching: any message updated during this run then gets
@@ -93,12 +103,23 @@ export class CarbonVoiceSync {
       return { firstRun: true, conversations: 0, voiceMemos: 0 }
     }
 
-    const messages = await this.collectMessagesSince(api, since)
+    const progress: SyncProgress = { phase: 'fetching', fetched: 0, conversations: 0, voiceMemos: 0 }
+    const messages = await this.collectMessagesSince(api, since, n => {
+      progress.fetched = n
+      onProgress?.(progress)
+    })
+    progress.phase = 'writing'
     const memos = messages.filter(m => this.isVoiceMemo(m) && this.memoInScope(m))
     const convMsgs = await this.selectConversationMessages(api, messages)
 
-    const voiceMemos = await this.processVoiceMemos(api, memos)
-    const conversations = await this.processConversations(api, convMsgs)
+    const voiceMemos = await this.processVoiceMemos(api, memos, () => {
+      progress.voiceMemos++
+      onProgress?.(progress)
+    })
+    const conversations = await this.processConversations(api, convMsgs, () => {
+      progress.conversations++
+      onProgress?.(progress)
+    })
 
     this.settings.lastSyncTimestamp = startedAt
     await this.plugin.saveSettings()
@@ -110,7 +131,8 @@ export class CarbonVoiceSync {
   // Each category is filtered to its own window. Does not touch the incremental baseline.
   async importHistory(
     conversationWindow: HistoryWindow,
-    voiceMemoWindow: HistoryWindow
+    voiceMemoWindow: HistoryWindow,
+    onProgress?: (p: SyncProgress) => void
   ): Promise<SyncResult> {
     const api = new CarbonVoiceAPI(this.settings.apiToken)
     await this.ensureBaseViews()
@@ -118,16 +140,27 @@ export class CarbonVoiceSync {
     const memoSince = this.windowToSince(voiceMemoWindow)
     // Fetch once over the larger of the two windows, then filter each category by its own.
     const earliest = convSince < memoSince ? convSince : memoSince
-    const messages = await this.collectMessagesSince(api, earliest)
+    const progress: SyncProgress = { phase: 'fetching', fetched: 0, conversations: 0, voiceMemos: 0 }
+    const messages = await this.collectMessagesSince(api, earliest, n => {
+      progress.fetched = n
+      onProgress?.(progress)
+    })
+    progress.phase = 'writing'
 
     const memoMsgs = messages.filter(
       m => m.created_at >= memoSince && this.isVoiceMemo(m) && this.memoInScope(m)
     )
-    const voiceMemos = await this.processVoiceMemos(api, memoMsgs)
+    const voiceMemos = await this.processVoiceMemos(api, memoMsgs, () => {
+      progress.voiceMemos++
+      onProgress?.(progress)
+    })
 
     const convCandidates = messages.filter(m => m.created_at >= convSince)
     const convMsgs = await this.selectConversationMessages(api, convCandidates)
-    const conversations = await this.processConversations(api, convMsgs)
+    const conversations = await this.processConversations(api, convMsgs, () => {
+      progress.conversations++
+      onProgress?.(progress)
+    })
 
     return { firstRun: false, conversations, voiceMemos }
   }
@@ -137,7 +170,8 @@ export class CarbonVoiceSync {
   // All messages updated at/after `sinceIso`, paging forward by last_updated_at.
   private async collectMessagesSince(
     api: CarbonVoiceAPI,
-    sinceIso: string
+    sinceIso: string,
+    onFetch?: (total: number) => void
   ): Promise<CarbonVoiceMessage[]> {
     const out = new Map<string, CarbonVoiceMessage>()
     let cursor = sinceIso
@@ -155,7 +189,13 @@ export class CarbonVoiceSync {
         const ts = m.last_updated_at || m.created_at
         if (ts > newest) newest = ts
       }
-      if (newest === cursor || page.length < PAGE) break
+      onFetch?.(out.size)
+      // Advance by the newest timestamp seen and keep paging. A short page (fewer than PAGE rows)
+      // is NOT end-of-data — /v3/messages/recent caps its page size below our requested limit, so
+      // stopping on a short page would drop everything past the first page (the oldest slice for a
+      // `newer` scan), which is exactly what made a larger history window return fewer memos. Stop
+      // only when a page is empty or the cursor can't move forward.
+      if (newest === cursor) break
       cursor = newest
     }
     return [...out.values()]
@@ -186,7 +226,10 @@ export class CarbonVoiceSync {
         if (m.created_at >= start && m.created_at < end) out.set(m.message_id, m)
         if (m.created_at < oldest) oldest = m.created_at
       }
-      if (oldest < start || oldest === cursor || page.length < PAGE) break
+      // Stop once we've paged past the period start or the cursor can't move older. A short page
+      // (fewer than PAGE rows) is NOT end-of-data — the endpoint caps page size below our requested
+      // limit — so we keep paging until a real terminator trips instead of dropping older messages.
+      if (oldest < start || oldest === cursor) break
       cursor = oldest
     }
     return [...out.values()]
@@ -196,7 +239,8 @@ export class CarbonVoiceSync {
 
   private async processVoiceMemos(
     api: CarbonVoiceAPI,
-    memos: CarbonVoiceMessage[]
+    memos: CarbonVoiceMessage[],
+    onTick?: () => void
   ): Promise<number> {
     const live = memos.filter(m => !m.deleted_at && !isPending(m))
     if (live.length === 0) return 0
@@ -229,6 +273,7 @@ export class CarbonVoiceSync {
         this.buildVoiceMemoNote(m, subpath, title, transcript, summary, wsName, creatorName, audioPath)
       )
       count++
+      onTick?.()
     }
     return count
   }
@@ -345,8 +390,12 @@ export class CarbonVoiceSync {
       `cv_folder: ${yaml(subpath)}`,
       `title: ${yaml(title)}`,
       `date: ${m.created_at.slice(0, 10)}`,
+      `time: ${yaml(m.created_at.slice(11, 16))}`,
       `duration: ${durationSec}`,
     ]
+    const memoName = m.name?.trim()
+    if (memoName) fm.push(`name: ${yaml(memoName)}`)
+    if (summary) fm.push(`summary: ${yaml(summary)}`)
     if (wsName) fm.push(`workspace_name: ${yaml(wsName)}`)
     if (link && creatorName) fm.push(`person: ${yaml(this.personLink(creatorName))}`)
     fm.push('tags: [carbon-voice, voice-memo]', '---', '')
@@ -378,7 +427,8 @@ export class CarbonVoiceSync {
 
   private async processConversations(
     api: CarbonVoiceAPI,
-    convMsgs: CarbonVoiceMessage[]
+    convMsgs: CarbonVoiceMessage[],
+    onTick?: () => void
   ): Promise<number> {
     const live = convMsgs.filter(m => !m.deleted_at && !isPending(m))
     const grouping = this.settings.messageGrouping
@@ -400,8 +450,19 @@ export class CarbonVoiceSync {
     for (const [ch, periods] of touched) {
       let channel = channelCache.get(ch)
       if (!channel) {
-        channel = await api.getChannel(ch)
-        channelCache.set(ch, channel)
+        try {
+          channel = await api.getChannel(ch)
+          channelCache.set(ch, channel)
+        } catch (err) {
+          // The channel can't be fetched (e.g. deleted on the backend → 403). Drop it: skip its
+          // messages entirely and carry on with the other channels rather than aborting the sync.
+          console.warn(
+            `Carbon Voice: skipping channel ${ch} — could not be fetched (${
+              err instanceof Error ? err.message : String(err)
+            })`
+          )
+          continue
+        }
       }
       if (this.settings.linkNotes) await this.ensureEntityNotes(channel)
       const folder = await this.resolveChannelFolder(channel, claimed)
@@ -426,6 +487,7 @@ export class CarbonVoiceSync {
           this.buildConversationNote(channel, period, grouping, indexBase, msgs, audioPaths)
         )
         count++
+        onTick?.()
       }
     }
     return count
@@ -740,13 +802,13 @@ export class CarbonVoiceSync {
     }
   }
 
-  // Writes the ready-made Bases views into the vault once — "Conversations by Date" at the sync
-  // root and "All Voice Memos" inside the Voice Memos folder — so they ship with the plugin.
+  // Writes the ready-made Bases views into the vault once — "Conversations by Date" and
+  // "All Voice Memos" both at the sync root — so they ship with the plugin.
   // Create-if-absent: never overwrites, so a user's edits (or deletion) stick. Requires Obsidian's
   // core Bases plugin to render.
   private async ensureBaseViews(): Promise<void> {
     await this.createIfAbsent(`${this.root()}/Conversations by Date.base`, CONVERSATIONS_BASE)
-    await this.createIfAbsent(`${this.root()}/Voice Memos/All Voice Memos.base`, VOICE_MEMOS_BASE)
+    await this.createIfAbsent(`${this.root()}/All Voice Memos.base`, VOICE_MEMOS_BASE)
   }
 
   // Writes a conversation "home" note at the folder root: identity/metadata up top, an embedded
@@ -851,9 +913,10 @@ export class CarbonVoiceSync {
         '',
         `# ${name}`,
         '',
-        '> Auto-created by Carbon Voice Sync. Add your own notes here — a later sync never overwrites',
-        '> this file. The table below lists every conversation this person takes part in, newest first;',
-        '> the backlinks pane also catches voice memos they appear in.',
+        '> Auto-created by Carbon Voice Sync. ',
+        '> Add your own notes here — a later sync never overwrites this file',
+        '> The table below lists every conversation this person takes part in (Last used first)',
+        '> Open the backlinks pane to see see links to all their messages.',
         '',
         // Embedded Bases view (core Bases plugin, 1.9+). Scoped to this person via the plain-text
         // `participant_names` on conversation notes, and to period notes via `grouping` so conversation
@@ -1034,10 +1097,18 @@ function sanitize(name: string): string {
   return cleaned || 'Untitled'
 }
 
-// Minimal YAML string escaping for frontmatter scalar values.
+// Minimal YAML string escaping for frontmatter scalar values. Multi-line values (e.g. an AI
+// summary) are kept on one line via double-quoted `\n` escapes so they stay valid, table-friendly
+// properties rather than spilling raw newlines into the frontmatter block.
 function yaml(value: string): string {
-  if (/[:#[\]{}",&*!|>'%@`]/.test(value) || value.trim() !== value) {
-    return `"${value.replace(/"/g, '\\"')}"`
+  if (/[:#[\]{}",&*!|>'%@`\n\r\t]/.test(value) || value.trim() !== value) {
+    const escaped = value
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"')
+      .replace(/\n/g, '\\n')
+      .replace(/\r/g, '\\r')
+      .replace(/\t/g, '\\t')
+    return `"${escaped}"`
   }
   return value
 }
