@@ -18,9 +18,9 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
 
     this.registerView(CARBON_VOICE_VIEW, leaf => new CarbonVoiceView(leaf, this))
 
-    // The mic keeps its one-tap sync; a separate icon/command opens the Carbon Voice panel.
-    this.addRibbonIcon('microphone', 'Sync Carbon Voice', () => this.runSync())
-    this.addRibbonIcon('panel-right', 'Open Carbon Voice panel', () => this.activateView())
+    // The mic ribbon opens the Carbon Voice panel in the main area. Sync is available from the
+    // panel's Sync button and the "Sync now" command.
+    this.addRibbonIcon('microphone', 'Open Carbon Voice', () => this.activateView())
 
     this.addCommand({
       id: 'sync-now',
