@@ -10,6 +10,7 @@ import type {
   WorkspaceRole,
   SyncScope,
   AudioMode,
+  MessageGrouping,
 } from './types'
 import { ASYNC_MEETING_PREFIX } from './types'
 
@@ -314,6 +315,23 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
     } else if (this.plugin.settings.conversationScope === 'by_conversation') {
       this.renderConversationSelector(containerEl)
     }
+
+    new Setting(containerEl)
+      .setName('Group conversation messages')
+      .setDesc(
+        'Chunk each conversation into one note per month, week, or day. Changing this regroups future syncs; notes written under the old grouping are left in place.'
+      )
+      .addDropdown(drop =>
+        drop
+          .addOption('month', 'By month')
+          .addOption('week', 'By week')
+          .addOption('day', 'By day')
+          .setValue(this.plugin.settings.messageGrouping)
+          .onChange(async value => {
+            this.plugin.settings.messageGrouping = value as MessageGrouping
+            await this.plugin.saveSettings()
+          })
+      )
 
     // ── Voice memo scope ────────────────────────────────────────────────────
 

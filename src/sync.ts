@@ -1,4 +1,4 @@
-import { TFile, normalizePath } from 'obsidian'
+import { TFile, TFolder, normalizePath } from 'obsidian'
 import type CarbonVoiceSyncPlugin from './main'
 import { CarbonVoiceAPI } from './api'
 import type {
@@ -6,6 +6,7 @@ import type {
   CarbonVoiceChannel,
   CarbonVoiceFolder,
   HistoryWindow,
+  MessageGrouping,
 } from './types'
 import { ASYNC_MEETING_PREFIX } from './types'
 import { formatTranscript } from './transcript-format'
@@ -18,6 +19,29 @@ export interface SyncResult {
 
 const PAGE = 200
 const MAX_PAGES = 500 // safety cap on pagination loops
+
+// Ready-made Obsidian Bases view (core Bases plugin, 1.9+). Selects conversation notes by their
+// `grouping` property (only conversation notes have it, so voice memos are excluded), groups by
+// `date`, and sorts newest-first — an inbox-style "by date" table over the existing notes, no
+// file duplication. Written once via create-if-absent; users can refine it in the Bases GUI.
+const CONVERSATIONS_BASE = `filters:
+  or:
+    - 'grouping == "month"'
+    - 'grouping == "week"'
+    - 'grouping == "day"'
+views:
+  - type: table
+    name: Conversations by date
+    groupBy:
+      property: date
+      direction: DESC
+    order:
+      - conversation
+      - workspace_name
+      - message_count
+      - last_message_at
+      - conversation_link
+`
 
 export class CarbonVoiceSync {
   constructor(private plugin: CarbonVoiceSyncPlugin) {}
@@ -34,6 +58,7 @@ export class CarbonVoiceSync {
   // Forward incremental sync. First run only sets the baseline (no historical pull).
   async syncIncremental(): Promise<SyncResult> {
     const api = new CarbonVoiceAPI(this.settings.apiToken)
+    await this.ensureConversationsView()
     // Capture the baseline before fetching: any message updated during this run then gets
     // re-pulled next time rather than being skipped. Status changes bump last_updated_at, so
     // a message that goes `active` (transcript ready) after we saw it will resync on its own.
@@ -66,6 +91,7 @@ export class CarbonVoiceSync {
     voiceMemoWindow: HistoryWindow
   ): Promise<SyncResult> {
     const api = new CarbonVoiceAPI(this.settings.apiToken)
+    await this.ensureConversationsView()
     const convSince = this.windowToSince(conversationWindow)
     const memoSince = this.windowToSince(voiceMemoWindow)
     // Fetch once over the larger of the two windows, then filter each category by its own.
@@ -113,13 +139,15 @@ export class CarbonVoiceSync {
     return [...out.values()]
   }
 
-  // A single channel's messages within one YYYY-MM month, paging older from the month end.
-  private async fetchChannelMonth(
+  // A single channel's messages within one grouping period (month / week / day), paging older
+  // from the period end.
+  private async fetchChannelPeriod(
     api: CarbonVoiceAPI,
     channelGuid: string,
-    monthKey: string
+    periodKey: string,
+    grouping: MessageGrouping
   ): Promise<CarbonVoiceMessage[]> {
-    const { start, end } = monthBounds(monthKey)
+    const { start, end } = periodBounds(periodKey, grouping)
     const out = new Map<string, CarbonVoiceMessage>()
     let cursor = end
     for (let i = 0; i < MAX_PAGES; i++) {
@@ -155,6 +183,9 @@ export class CarbonVoiceSync {
     const workspaces = await this.fetchWorkspaceNames(api)
 
     let count = 0
+    // Tracks the note path each memo claimed this run, so two same-titled memos in one import
+    // don't fight over one file — the second is disambiguated instead of overwriting the first.
+    const claimed = new Map<string, string>()
     for (const m of live) {
       const transcript = messageTranscript(m)
       const summary = extractText(m, 'summary')
@@ -169,7 +200,8 @@ export class CarbonVoiceSync {
       }
       const audioPath =
         this.settings.audioMode === 'download' ? await this.ensureAudio(api, m) : null
-      const path = `${this.root()}/Voice Memos/${subpath}/${sanitize(title)}.md`
+      const basePath = `${this.root()}/Voice Memos/${subpath}/${sanitize(title)}.md`
+      const path = await this.resolveMemoNotePath(basePath, m, claimed)
       await this.upsertFile(
         path,
         this.buildVoiceMemoNote(m, subpath, title, transcript, summary, wsName, creatorName, audioPath)
@@ -177,6 +209,81 @@ export class CarbonVoiceSync {
       count++
     }
     return count
+  }
+
+  // Picks the on-disk note path for a memo. A memo keeps its clean title-based filename unless a
+  // *different* memo already owns that path (on disk from a past sync, or claimed earlier this
+  // run) — then a short message-id tag is appended so neither memo silently overwrites the other.
+  // The note's displayed title (frontmatter/H1) is unchanged; only the filename carries the tag.
+  // Identity is the memo id in frontmatter, so re-syncing the same memo reuses its file in place.
+  private async resolveMemoNotePath(
+    basePath: string,
+    m: CarbonVoiceMessage,
+    claimed: Map<string, string>
+  ): Promise<string> {
+    const base = normalizePath(basePath)
+    const owner = claimed.get(base) ?? (await this.memoIdAt(base))
+    let chosen = base
+    if (owner != null && owner !== m.message_id) {
+      const short = m.message_id.replace(/[^a-zA-Z0-9]/g, '').slice(0, 6) || m.message_id
+      chosen = normalizePath(base.replace(/\.md$/i, ` (${short}).md`))
+      // Astronomically unlikely, but if that tagged slot is taken by yet another memo, fall back
+      // to the full id — guaranteed unique.
+      const tagOwner = claimed.get(chosen) ?? (await this.memoIdAt(chosen))
+      if (tagOwner != null && tagOwner !== m.message_id) {
+        chosen = normalizePath(base.replace(/\.md$/i, ` (${m.message_id}).md`))
+      }
+    }
+    claimed.set(chosen, m.message_id)
+    return chosen
+  }
+
+  // The Carbon Voice memo id recorded in a note's frontmatter, or null if no note (or no id) lives
+  // at `path`. Uses the metadata cache when warm and only reads the file when it isn't — which
+  // happens at most on a genuine path collision, never on the common new-file / same-memo path.
+  private async memoIdAt(path: string): Promise<string | null> {
+    const f = this.app.vault.getAbstractFileByPath(path)
+    if (!(f instanceof TFile)) return null
+    const cached = this.app.metadataCache.getFileCache(f)?.frontmatter?.cv_memo_id
+    if (typeof cached === 'string') return cached
+    const match = (await this.app.vault.read(f)).match(/^cv_memo_id:\s*(\S+)/m)
+    return match ? match[1] : null
+  }
+
+  // Picks the folder for a channel's month notes. A channel keeps its clean name-based folder
+  // unless a *different* channel already owns it (on disk from a past sync, or claimed earlier
+  // this run) — then a short channel-guid tag is appended. Identity is cv_conversation_id in the
+  // month notes, so re-syncing the same channel reuses its folder in place.
+  private async resolveChannelFolder(
+    channel: CarbonVoiceChannel,
+    claimed: Map<string, string>
+  ): Promise<string> {
+    const base = normalizePath(
+      `${this.root()}/Conversations/${sanitize(workspaceName(channel))}/${sanitize(channelName(channel))}`
+    )
+    const owner = claimed.get(base) ?? (await this.channelIdAt(base))
+    let chosen = base
+    if (owner != null && owner !== channel.channel_guid) {
+      chosen = normalizePath(`${base} (${channel.channel_guid.slice(0, 8)})`)
+    }
+    claimed.set(chosen, channel.channel_guid)
+    return chosen
+  }
+
+  // The cv_conversation_id owning a channel folder, read from any month note inside it, or null if
+  // the folder is absent/empty. Uses the metadata cache when warm and only reads a file when it
+  // isn't — so the common same-channel / new-folder path stays I/O-free.
+  private async channelIdAt(folderPath: string): Promise<string | null> {
+    const folder = this.app.vault.getAbstractFileByPath(folderPath)
+    if (!(folder instanceof TFolder)) return null
+    for (const child of folder.children) {
+      if (!(child instanceof TFile) || child.extension !== 'md') continue
+      const cached = this.app.metadataCache.getFileCache(child)?.frontmatter?.cv_conversation_id
+      if (typeof cached === 'string') return cached
+      const match = (await this.app.vault.read(child)).match(/^cv_conversation_id:\s*(\S+)/m)
+      if (match) return match[1]
+    }
+    return null
   }
 
   private memoSubpath(
@@ -252,27 +359,37 @@ export class CarbonVoiceSync {
     convMsgs: CarbonVoiceMessage[]
   ): Promise<number> {
     const live = convMsgs.filter(m => !m.deleted_at && !isPending(m))
-    // Which (channel, month) files were touched?
+    const grouping = this.settings.messageGrouping
+    // Which (channel, period) files were touched? A period is a month, week, or day per the setting.
     const touched = new Map<string, Set<string>>()
     for (const m of live) {
-      const month = m.created_at.slice(0, 7)
+      const period = periodKey(m.created_at, grouping)
       for (const ch of m.channel_ids) {
         if (!touched.has(ch)) touched.set(ch, new Set())
-        touched.get(ch)!.add(month)
+        touched.get(ch)!.add(period)
       }
     }
 
     let count = 0
     const channelCache = new Map<string, CarbonVoiceChannel>()
-    for (const [ch, months] of touched) {
+    // Tracks the folder each channel claimed this run, so two channels sharing a workspace + name
+    // don't write into one folder — the second is disambiguated instead of overwriting the first.
+    const claimed = new Map<string, string>()
+    for (const [ch, periods] of touched) {
       let channel = channelCache.get(ch)
       if (!channel) {
         channel = await api.getChannel(ch)
         channelCache.set(ch, channel)
       }
       if (this.settings.linkNotes) await this.ensureEntityNotes(channel)
-      for (const month of months) {
-        const msgs = (await this.fetchChannelMonth(api, ch, month)).filter(
+      const folder = await this.resolveChannelFolder(channel, claimed)
+      // A per-conversation "home" note at the folder root: info up top, an embedded conversation-
+      // scoped Bases table below. It's the linkable stand-in for the folder (Obsidian can't link a
+      // folder directly) and each period note links back to it.
+      const indexBase = `${folder}/${sanitize(channelName(channel))}`
+      await this.ensureConversationIndex(channel, indexBase)
+      for (const period of periods) {
+        const msgs = (await this.fetchChannelPeriod(api, ch, period, grouping)).filter(
           m => !m.deleted_at && !isPending(m)
         )
         if (msgs.length === 0) continue
@@ -281,8 +398,11 @@ export class CarbonVoiceSync {
           this.settings.audioMode === 'download'
             ? await this.collectAudio(api, msgs)
             : new Map<string, string>()
-        const path = `${this.root()}/Conversations/${sanitize(workspaceName(channel))}/${sanitize(channelName(channel))}/${month} Messages.md`
-        await this.upsertFile(path, this.buildConversationNote(channel, month, msgs, audioPaths))
+        const path = `${folder}/${periodFileLabel(period, grouping)}`
+        await this.upsertFile(
+          path,
+          this.buildConversationNote(channel, period, grouping, indexBase, msgs, audioPaths)
+        )
         count++
       }
     }
@@ -291,7 +411,9 @@ export class CarbonVoiceSync {
 
   private buildConversationNote(
     channel: CarbonVoiceChannel,
-    monthKey: string,
+    period: string,
+    grouping: MessageGrouping,
+    indexBase: string,
     messages: CarbonVoiceMessage[],
     audioPaths: Map<string, string>
   ): string {
@@ -305,22 +427,40 @@ export class CarbonVoiceSync {
     const wsName = channel.workspace_name ?? ''
     const participantsFm = participants.map(p => (link ? this.personLink(p) : p))
 
+    // Date/recency fields for by-date views (Bases/Dataview): `date` is the period's first day
+    // (the day itself for day-grouping, the Monday for week, the 1st for month); `last_message_at`
+    // is the newest message in the note — the "most recently touched" key an inbox-style view
+    // sorts on so the freshest conversation floats to the top.
+    const noteDate = periodBounds(period, grouping).start.slice(0, 10)
+    const lastMessageAt = messages.reduce(
+      (max, m) => (m.created_at > max ? m.created_at : max),
+      messages[0]?.created_at ?? `${noteDate}T00:00:00.000Z`
+    )
+
     const fm = [
       '---',
       `cv_conversation_id: ${channel.channel_guid}`,
       `conversation_link: https://carbonvoice.app/c/${channel.channel_guid}`,
       `conversation_name: ${yaml(title)}`,
+      // The conversation name stored as a link to its "home" note: one column that shows the name
+      // and clicks through to the whole conversation (the stand-in for its folder). The plain
+      // `conversation_name` above stays for search/other queries.
+      `conversation: ${yaml(`[[${indexBase}|${title}]]`)}`,
       `workspace_name: ${yaml(wsName)}`,
       `workspace_id: ${channel.workspace_guid}`,
     ]
     fm.push(
-      `month: ${monthKey}`,
+      `period: ${period}`,
+      `grouping: ${grouping}`,
+      `date: ${noteDate}`,
+      `last_message_at: ${lastMessageAt}`,
+      `message_count: ${messages.length}`,
       `participants: [${participantsFm.map(yaml).join(', ')}]`,
       'tags: [carbon-voice]',
       '---',
       ''
     )
-    const body: string[] = [`# ${title} — ${formatMonth(monthKey)}`, '']
+    const body: string[] = [`# ${title} — ${formatPeriod(period, grouping)}`, '']
 
     if (this.settings.includeTranscripts) {
       body.push('## Messages', '')
@@ -343,7 +483,17 @@ export class CarbonVoiceSync {
           ''
         )
         body.push(...this.audioBlock(m, audioPaths.get(m.message_id) ?? null))
-        body.push(`<sub><a href="${url}">Open in Carbon Voice ↗</a></sub>`, '', '---', '')
+        // Precise UTC timestamp (searchable with ⌘-Shift-F, unlike the local heading) plus a
+        // stable block id derived from the message id, so a single message can be deep-linked or
+        // bookmarked: [[<period> Messages#^cv-<id>]]. The id is deterministic, so it survives
+        // re-syncs; Obsidian hides both the ^anchor and the <sub> chrome in reading view.
+        const stamp = messageStamp(m.created_at)
+        body.push(
+          `<sub>🕒 ${stamp} · <a href="${url}">Open in Carbon Voice ↗</a></sub> ^cv-${blockAnchor(m.message_id)}`,
+          '',
+          '---',
+          ''
+        )
       }
     }
 
@@ -499,6 +649,9 @@ export class CarbonVoiceSync {
 
   private async upsertFile(rawPath: string, content: string): Promise<void> {
     const path = normalizePath(rawPath)
+    // Exact-case lookup only: on a case-sensitive filesystem two paths differing only in case are
+    // genuinely separate notes, so we must not resolve one to the other here — that would clobber
+    // a distinct file. Overwrite only when the exact path already holds a note.
     const existing = this.app.vault.getAbstractFileByPath(path)
     if (existing instanceof TFile) {
       await this.app.vault.process(existing, () => content)
@@ -506,7 +659,29 @@ export class CarbonVoiceSync {
     }
     const dir = path.split('/').slice(0, -1).join('/')
     if (dir) await this.ensureFolder(dir)
-    await this.app.vault.create(path, content)
+    try {
+      await this.app.vault.create(path, content)
+    } catch (err) {
+      // The vault index is case-sensitive but macOS/Windows filesystems are not, so a path that
+      // differs only in case from an existing note passes the exact-case check above yet collides
+      // on disk — Obsidian throws "File already exists". Recover by overwriting the note that
+      // actually occupies the slot instead of aborting the whole import. Only reached on a throw,
+      // so case-sensitive filesystems (where create succeeds) never pay this scan. Re-throw when
+      // nothing resolves — a genuine error, or a folder occupying the path we can't overwrite.
+      const collided = this.resolveCaseInsensitive(path)
+      if (!collided) throw err
+      await this.app.vault.process(collided, () => content)
+    }
+  }
+
+  // Finds the note occupying `path` on a case-insensitive filesystem when the exact-case index
+  // lookup missed. Returns null when no file (folders don't count) matches.
+  private resolveCaseInsensitive(path: string): TFile | null {
+    const lower = path.toLowerCase()
+    for (const f of this.app.vault.getFiles()) {
+      if (f.path.toLowerCase() === lower) return f
+    }
+    return null
   }
 
   private async ensureFolder(dir: string): Promise<void> {
@@ -522,6 +697,68 @@ export class CarbonVoiceSync {
         }
       }
     }
+  }
+
+  // Writes the ready-made "Conversations by Date" Bases view into the sync folder once, so the
+  // by-date/recency table ships with the plugin. Create-if-absent: never overwrites, so a user's
+  // edits (or deletion) stick. Requires Obsidian's core Bases plugin to render.
+  private async ensureConversationsView(): Promise<void> {
+    await this.createIfAbsent(`${this.root()}/Conversations by Date.base`, CONVERSATIONS_BASE)
+  }
+
+  // Writes a conversation "home" note at the folder root: identity/metadata up top, an embedded
+  // conversation-scoped Bases table below (its period notes, newest first). This is the linkable
+  // stand-in for the folder. Create-if-absent so user edits stick; the embedded table stays live
+  // since it queries the period notes rather than hard-coding them. `indexBase` has no extension.
+  private async ensureConversationIndex(
+    channel: CarbonVoiceChannel,
+    indexBase: string
+  ): Promise<void> {
+    const name = channelName(channel)
+    const wsName = channel.workspace_name ?? ''
+    const url = `https://carbonvoice.app/c/${channel.channel_guid}`
+    const lines = [
+      '---',
+      `cv_conversation_id: ${channel.channel_guid}`,
+      `conversation_name: ${yaml(name)}`,
+      `workspace_name: ${yaml(wsName)}`,
+      `workspace_id: ${channel.workspace_guid}`,
+      `conversation_link: ${url}`,
+      'tags: [carbon-voice, conversation]',
+      '---',
+      '',
+      `# ${name}`,
+      '',
+    ]
+    if (wsName) lines.push(`- **Workspace:** ${wsName}`)
+    lines.push(
+      `- [Open in Carbon Voice ↗](${url})`,
+      '',
+      '> Conversation home. The table below lists this conversation’s notes (grouped by month, week,',
+      '> or day per the sync setting), newest first — click one to open that period’s messages.',
+      '',
+      // Embedded Bases view (core Bases plugin). Scoped to this conversation by its id, and limited
+      // to period notes via `grouping` so the home note doesn't list itself.
+      '```base',
+      'filters:',
+      '  and:',
+      `    - 'cv_conversation_id == "${channel.channel_guid}"'`,
+      '    - or:',
+      `        - 'grouping == "month"'`,
+      `        - 'grouping == "week"'`,
+      `        - 'grouping == "day"'`,
+      'views:',
+      '  - type: table',
+      '    name: Messages by period',
+      '    order:',
+      '      - file.name',
+      '      - date',
+      '      - message_count',
+      '      - last_message_at',
+      '```',
+      '',
+    )
+    await this.createIfAbsent(`${indexBase}.md`, lines.join('\n'))
   }
 
   // Creates a file only if it doesn't already exist — never overwrites. Used for People/Workspace
@@ -729,24 +966,86 @@ function yaml(value: string): string {
   return value
 }
 
-function monthBounds(monthKey: string): { start: string; end: string } {
-  const [y, m] = monthKey.split('-').map(Number)
-  const start = new Date(Date.UTC(y, m - 1, 1))
-  const end = new Date(Date.UTC(m === 12 ? y + 1 : y, m === 12 ? 0 : m, 1))
+// The grouping key a message's timestamp falls into (all UTC): "YYYY-MM" for month, the Monday
+// date "YYYY-MM-DD" for week, or "YYYY-MM-DD" for day.
+function periodKey(iso: string, grouping: MessageGrouping): string {
+  switch (grouping) {
+    case 'day':
+      return iso.slice(0, 10)
+    case 'week':
+      return weekStartKey(iso)
+    default:
+      return iso.slice(0, 7)
+  }
+}
+
+// The Monday (UTC) that starts the ISO week containing `iso`, as "YYYY-MM-DD".
+function weekStartKey(iso: string): string {
+  const d = new Date(iso)
+  const dow = d.getUTCDay() // 0=Sun … 6=Sat
+  const backToMonday = dow === 0 ? 6 : dow - 1
+  const monday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - backToMonday))
+  return monday.toISOString().slice(0, 10)
+}
+
+// Half-open [start, end) UTC bounds for a period key under the active grouping.
+function periodBounds(key: string, grouping: MessageGrouping): { start: string; end: string } {
+  if (grouping === 'month') {
+    const [y, m] = key.split('-').map(Number)
+    const start = new Date(Date.UTC(y, m - 1, 1))
+    const end = new Date(Date.UTC(m === 12 ? y + 1 : y, m === 12 ? 0 : m, 1))
+    return { start: start.toISOString(), end: end.toISOString() }
+  }
+  // Day and week both key off a calendar date; Date.UTC normalises day overflow past month/year.
+  const [y, m, d] = key.split('-').map(Number)
+  const span = grouping === 'week' ? 7 : 1
+  const start = new Date(Date.UTC(y, m - 1, d))
+  const end = new Date(Date.UTC(y, m - 1, d + span))
   return { start: start.toISOString(), end: end.toISOString() }
 }
 
-function formatMonth(monthKey: string): string {
-  const [y, m] = monthKey.split('-').map(Number)
-  return new Date(Date.UTC(y, m - 1, 1)).toLocaleString('en-US', {
+// Filename for a period's note. Month/day are just the key; week adds a "Week" marker so a week
+// file never collides with the same-dated day file.
+function periodFileLabel(key: string, grouping: MessageGrouping): string {
+  return grouping === 'week' ? `${key} Week Messages.md` : `${key} Messages.md`
+}
+
+// Human heading for a period: "July 2026", "Week of July 6, 2026", or "July 6, 2026".
+function formatPeriod(key: string, grouping: MessageGrouping): string {
+  if (grouping === 'month') {
+    const [y, m] = key.split('-').map(Number)
+    return new Date(Date.UTC(y, m - 1, 1)).toLocaleString('en-US', {
+      month: 'long',
+      year: 'numeric',
+      timeZone: 'UTC',
+    })
+  }
+  const [y, m, d] = key.split('-').map(Number)
+  const full = new Date(Date.UTC(y, m - 1, d)).toLocaleString('en-US', {
     month: 'long',
+    day: 'numeric',
     year: 'numeric',
     timeZone: 'UTC',
   })
+  return grouping === 'week' ? `Week of ${full}` : full
 }
 
 function formatDayShort(iso: string): string {
   return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric' })
+}
+
+// Minute-precision UTC stamp for a message's metadata line, e.g. "2026-07-12T15:04Z". Unlike the
+// locale-formatted heading time, this is deterministic text that an exact date/time search hits.
+function messageStamp(iso: string): string {
+  return `${iso.slice(0, 16)}Z`
+}
+
+// A safe, stable Obsidian block-id fragment from a message id: strip non-alphanumerics (block ids
+// allow only [A-Za-z0-9-]) and keep a short, collision-free-within-a-note slice. Deterministic, so
+// the anchor is identical across re-syncs and existing deep links keep resolving.
+function blockAnchor(messageId: string): string {
+  const cleaned = messageId.replace(/[^a-zA-Z0-9]/g, '')
+  return cleaned.slice(0, 12) || 'msg'
 }
 
 function formatTime(iso: string): string {

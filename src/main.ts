@@ -2,6 +2,7 @@ import { Notice, Plugin } from 'obsidian'
 import { CarbonVoiceSettings, DEFAULT_SETTINGS } from './types'
 import { CarbonVoiceSettingTab } from './settings'
 import { CarbonVoiceSync } from './sync'
+import { CarbonVoiceView, CARBON_VOICE_VIEW } from './view'
 
 export default class CarbonVoiceSyncPlugin extends Plugin {
   settings!: CarbonVoiceSettings
@@ -15,12 +16,22 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
 
     this.addSettingTab(new CarbonVoiceSettingTab(this.app, this))
 
+    this.registerView(CARBON_VOICE_VIEW, leaf => new CarbonVoiceView(leaf, this))
+
+    // The mic keeps its one-tap sync; a separate icon/command opens the Carbon Voice panel.
     this.addRibbonIcon('microphone', 'Sync Carbon Voice', () => this.runSync())
+    this.addRibbonIcon('panel-right', 'Open Carbon Voice panel', () => this.activateView())
 
     this.addCommand({
       id: 'sync-now',
       name: 'Sync now',
       callback: () => this.runSync(),
+    })
+
+    this.addCommand({
+      id: 'open-panel',
+      name: 'Open panel',
+      callback: () => this.activateView(),
     })
 
     this.registerSyncInterval()
@@ -63,6 +74,7 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
       new Notice(`Carbon Voice: Sync failed — ${errMessage(err)}`)
     } finally {
       this.isSyncing = false
+      this.refreshPanel()
     }
   }
 
@@ -92,7 +104,36 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
       new Notice(`Carbon Voice: Import failed — ${errMessage(err)}`)
     } finally {
       this.isSyncing = false
+      this.refreshPanel()
     }
+  }
+
+  // Opens (or reveals) the Carbon Voice panel in a right-hand leaf.
+  async activateView(): Promise<void> {
+    const { workspace } = this.app
+    let leaf = workspace.getLeavesOfType(CARBON_VOICE_VIEW)[0]
+    if (!leaf) {
+      const right = workspace.getRightLeaf(false) ?? workspace.getLeaf(true)
+      await right.setViewState({ type: CARBON_VOICE_VIEW, active: true })
+      leaf = right
+    }
+    workspace.revealLeaf(leaf)
+  }
+
+  // Re-renders any open panel so its status line stays live after a sync from anywhere.
+  refreshPanel(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(CARBON_VOICE_VIEW)) {
+      const view = leaf.view
+      if (view instanceof CarbonVoiceView) view.render()
+    }
+  }
+
+  // Opens this plugin's settings tab (used by the panel's Settings button).
+  openSettings(): void {
+    const setting = (this.app as unknown as { setting?: { open(): void; openTabById(id: string): void } })
+      .setting
+    setting?.open()
+    setting?.openTabById(this.manifest.id)
   }
 
   registerSyncInterval(): void {

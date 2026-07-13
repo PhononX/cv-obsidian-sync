@@ -1,5 +1,8 @@
 export type SyncScope = 'all' | 'by_workspace' | 'by_conversation' | 'by_folder'
 export type HistoryWindow = 7 | 30 | 90 | 365 | 'all'
+// How a conversation's messages are chunked into note files: one file per calendar month, ISO
+// week (Monday-started), or day. All boundaries are UTC, matching the message-fetch windows.
+export type MessageGrouping = 'month' | 'week' | 'day'
 // How a message's audio is presented in a note:
 //  - 'download' → save the audio into the vault and embed a native offline player.
 //  - 'off'      → no player; the note keeps its "Open in Carbon Voice" link.
@@ -256,6 +259,8 @@ export interface CarbonVoiceSettings {
   conversationScope: SyncScope
   conversationWorkspaceIds: string[]
   conversationIds: string[]
+  // Chunk each conversation's messages into month / week / day note files.
+  messageGrouping: MessageGrouping
 
   // channel_guid → channel type, populated lazily during sync so an async-meeting rule only
   // fetches each conversation once instead of on every run.
@@ -287,6 +292,7 @@ export const DEFAULT_SETTINGS: CarbonVoiceSettings = {
   conversationScope: 'all',
   conversationWorkspaceIds: [],
   conversationIds: [],
+  messageGrouping: 'month',
   channelTypeCache: {},
 
   voiceMemoScope: 'all',
