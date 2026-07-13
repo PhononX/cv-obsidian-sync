@@ -58,9 +58,12 @@ export class CarbonVoiceView extends ItemView {
           })
       )
 
-    new Setting(contentEl).setName('Settings').addButton(btn =>
-      btn.setButtonText('Open').onClick(() => this.plugin.openSettings())
-    )
+    new Setting(contentEl)
+      .setName('Settings')
+      .setDesc('Adjust what gets synced. Import History.')
+      .addButton(btn =>
+        btn.setButtonText('Open').onClick(() => this.plugin.openSettings())
+      )
 
     new Setting(contentEl)
       .setName('Conversations by date')
