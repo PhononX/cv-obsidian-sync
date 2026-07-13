@@ -187,6 +187,32 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
 
     new Setting(containerEl).setName('Sync').setHeading()
 
+    const lastSynced = this.plugin.settings.lastSyncTimestamp
+    new Setting(containerEl)
+      .setName('Last synced')
+      .setDesc(lastSynced ? new Date(lastSynced).toLocaleString() : 'Never')
+      .addButton(btn =>
+        btn
+          .setButtonText('Sync now')
+          .setCta()
+          .onClick(async () => {
+            await this.plugin.runSync()
+            this.display()
+          })
+      )
+
+    new Setting(containerEl)
+      .setName('Sync on startup')
+      .setDesc('Automatically sync when Obsidian opens')
+      .addToggle(toggle =>
+        toggle
+          .setValue(this.plugin.settings.syncOnStartup)
+          .onChange(async value => {
+            this.plugin.settings.syncOnStartup = value
+            await this.plugin.saveSettings()
+          })
+      )
+
     new Setting(containerEl)
       .setName('Sync folder')
       .setDesc('Root vault folder where all synced content is written')
@@ -257,36 +283,6 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
           .onChange(async value => {
             this.plugin.settings.audioMode = value as AudioMode
             await this.plugin.saveSettings()
-          })
-      )
-
-    new Setting(containerEl)
-      .setName('Sync on startup')
-      .setDesc('Automatically sync when Obsidian opens')
-      .addToggle(toggle =>
-        toggle
-          .setValue(this.plugin.settings.syncOnStartup)
-          .onChange(async value => {
-            this.plugin.settings.syncOnStartup = value
-            await this.plugin.saveSettings()
-          })
-      )
-
-    const lastSynced = this.plugin.settings.lastSyncTimestamp
-    new Setting(containerEl)
-      .setName('Last synced')
-      .setDesc(lastSynced ? new Date(lastSynced).toLocaleString() : 'Never')
-
-    new Setting(containerEl)
-      .setName('Sync now')
-      .setDesc('Trigger an immediate sync')
-      .addButton(btn =>
-        btn
-          .setButtonText('Sync now')
-          .setCta()
-          .onClick(async () => {
-            await this.plugin.runSync()
-            this.display()
           })
       )
 
