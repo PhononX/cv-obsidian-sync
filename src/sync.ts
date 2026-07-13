@@ -453,6 +453,10 @@ export class CarbonVoiceSync {
     const claimed = new Map<string, string>()
     for (const [ch, periods] of touched) {
       let channel = channelCache.get(ch)
+      // When the channel can't be fetched (e.g. deleted on the backend → 403) we don't abort the
+      // whole sync: we fall back to a synthetic "FAILED: <cid>" channel and write the messages we
+      // already pulled in the window instead of re-fetching from the unreachable channel.
+      let unreachable = false
       if (!channel) {
         // Log the messages that drove this channel fetch (with status / deleted_at) so a failure
         // here — e.g. a 403 on a channel deleted on the backend — can be traced to its messages.
@@ -466,8 +470,18 @@ export class CarbonVoiceSync {
             created_at: m.created_at,
           }))
         )
-        channel = await api.getChannel(ch)
-        channelCache.set(ch, channel)
+        try {
+          channel = await api.getChannel(ch)
+          channelCache.set(ch, channel)
+        } catch (err) {
+          unreachable = true
+          channel = fallbackChannel(ch, refs)
+          console.warn(
+            `Carbon Voice: channel ${ch} could not be fetched (${
+              err instanceof Error ? err.message : String(err)
+            }); writing its messages under "${channelName(channel)}"`
+          )
+        }
       }
       if (this.settings.linkNotes) await this.ensureEntityNotes(channel)
       const folder = await this.resolveChannelFolder(channel, claimed)
@@ -477,9 +491,13 @@ export class CarbonVoiceSync {
       const indexBase = `${folder}/${sanitize(channelName(channel))}`
       await this.ensureConversationIndex(channel, indexBase)
       for (const period of periods) {
-        const msgs = (await this.fetchChannelPeriod(api, ch, period, grouping)).filter(
-          m => !m.deleted_at && !isPending(m)
-        )
+        // For an unreachable channel, re-fetching by channel_id would fail too — use the messages
+        // we already have from the window, grouped into this period. Otherwise pull the full period.
+        const msgs = unreachable
+          ? (msgsByChannel.get(ch) ?? []).filter(m => periodKey(m.created_at, grouping) === period)
+          : (await this.fetchChannelPeriod(api, ch, period, grouping)).filter(
+              m => !m.deleted_at && !isPending(m)
+            )
         if (msgs.length === 0) continue
         msgs.sort((a, b) => a.created_at.localeCompare(b.created_at))
         const audioPaths =
@@ -1011,6 +1029,31 @@ export class CarbonVoiceSync {
 
 function channelName(c: CarbonVoiceChannel): string {
   return c.channel_name?.trim() || `Conversation ${c.channel_guid.slice(0, 8)}`
+}
+
+// Stand-in for a channel whose metadata can't be fetched (e.g. deleted on the backend). Named
+// "FAILED: <cid>" so its folder is unmistakable, and it carries the workspace guid from a
+// referencing message when one is known. Collaborators are unknown, so senders/participants in the
+// resulting notes render as "Unknown".
+function fallbackChannel(guid: string, refs: CarbonVoiceMessage[]): CarbonVoiceChannel {
+  return {
+    workspace_guid: refs.find(m => m.workspace_ids[0])?.workspace_ids[0] ?? '',
+    channel_guid: guid,
+    channel_name: `FAILED: ${guid}`,
+    channel_kind: 'standard',
+    type: 'namedConversation',
+    channel_description: null,
+    image_url: null,
+    workspace_name: '',
+    sort_order: null,
+    last_updated_ts: 0,
+    created_ts: 0,
+    last_posted_ts: null,
+    deleted_at: null,
+    json_collaborators: [],
+    total_messages: refs.length,
+    total_duration_milliseconds: 0,
+  }
 }
 
 function workspaceName(c: CarbonVoiceChannel): string {
