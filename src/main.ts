@@ -1,4 +1,4 @@
-import { Notice, Plugin } from 'obsidian'
+import { Notice, Plugin, WorkspaceLeaf } from 'obsidian'
 import { CarbonVoiceSettings, DEFAULT_SETTINGS } from './types'
 import { CarbonVoiceSettingTab } from './settings'
 import { CarbonVoiceSync } from './sync'
@@ -18,9 +18,9 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
 
     this.registerView(CARBON_VOICE_VIEW, leaf => new CarbonVoiceView(leaf, this))
 
-    // The mic keeps its one-tap sync; a separate icon/command opens the Carbon Voice panel.
-    this.addRibbonIcon('microphone', 'Sync Carbon Voice', () => this.runSync())
-    this.addRibbonIcon('panel-right', 'Open Carbon Voice panel', () => this.activateView())
+    // The mic ribbon opens the Carbon Voice panel in the main area. Sync is available from the
+    // panel's Sync button and the "Sync now" command.
+    this.addRibbonIcon('microphone', 'Open Carbon Voice', () => this.activateView())
 
     this.addCommand({
       id: 'sync-now',
@@ -108,16 +108,25 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
     }
   }
 
-  // Opens (or reveals) the Carbon Voice panel in a right-hand leaf.
+  // Opens (or reveals) the Carbon Voice panel as a tab in the main editor area. Reuses an existing
+  // Carbon Voice leaf if one is already open (sidebar or main) rather than spawning duplicates.
+  // Kicks off a sync on open so the panel reflects fresh data (skipped when no token is set;
+  // runSync itself no-ops if a sync is already running).
   async activateView(): Promise<void> {
     const { workspace } = this.app
-    let leaf = workspace.getLeavesOfType(CARBON_VOICE_VIEW)[0]
+    // Reuse a panel already in the MAIN area; close any leftover that lives in a sidebar (e.g. a
+    // stale right-sidebar leaf restored from an earlier layout) so the mic always lands center.
+    let leaf: WorkspaceLeaf | null = null
+    for (const existing of workspace.getLeavesOfType(CARBON_VOICE_VIEW)) {
+      if (existing.getRoot() === workspace.rootSplit) leaf = existing
+      else existing.detach()
+    }
     if (!leaf) {
-      const right = workspace.getRightLeaf(false) ?? workspace.getLeaf(true)
-      await right.setViewState({ type: CARBON_VOICE_VIEW, active: true })
-      leaf = right
+      leaf = workspace.getLeaf('tab')
+      await leaf.setViewState({ type: CARBON_VOICE_VIEW, active: true })
     }
     workspace.revealLeaf(leaf)
+    if (this.settings.apiToken) void this.runSync()
   }
 
   // Re-renders any open panel so its status line stays live after a sync from anywhere.
