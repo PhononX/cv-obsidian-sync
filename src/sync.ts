@@ -347,6 +347,9 @@ export class CarbonVoiceSync {
       `date: ${m.created_at.slice(0, 10)}`,
       `duration: ${durationSec}`,
     ]
+    const memoName = m.name?.trim()
+    if (memoName) fm.push(`name: ${yaml(memoName)}`)
+    if (summary) fm.push(`summary: ${yaml(summary)}`)
     if (wsName) fm.push(`workspace_name: ${yaml(wsName)}`)
     if (link && creatorName) fm.push(`person: ${yaml(this.personLink(creatorName))}`)
     fm.push('tags: [carbon-voice, voice-memo]', '---', '')
@@ -1020,10 +1023,18 @@ function sanitize(name: string): string {
   return cleaned || 'Untitled'
 }
 
-// Minimal YAML string escaping for frontmatter scalar values.
+// Minimal YAML string escaping for frontmatter scalar values. Multi-line values (e.g. an AI
+// summary) are kept on one line via double-quoted `\n` escapes so they stay valid, table-friendly
+// properties rather than spilling raw newlines into the frontmatter block.
 function yaml(value: string): string {
-  if (/[:#\[\]{}",&*!|>'%@`]/.test(value) || value.trim() !== value) {
-    return `"${value.replace(/"/g, '\\"')}"`
+  if (/[:#\[\]{}",&*!|>'%@`\n\r\t]/.test(value) || value.trim() !== value) {
+    const escaped = value
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"')
+      .replace(/\n/g, '\\n')
+      .replace(/\r/g, '\\r')
+      .replace(/\t/g, '\\t')
+    return `"${escaped}"`
   }
   return value
 }
