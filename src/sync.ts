@@ -17,7 +17,7 @@ export interface SyncResult {
   voiceMemos: number // voice memo notes written
 }
 
-const PAGE = 200
+const PAGE = 50
 const MAX_PAGES = 500 // safety cap on pagination loops
 
 // Ready-made Obsidian Bases view (core Bases plugin, 1.9+). Selects conversation notes by their
