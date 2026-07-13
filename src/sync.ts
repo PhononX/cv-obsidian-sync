@@ -433,12 +433,16 @@ export class CarbonVoiceSync {
     const live = convMsgs.filter(m => !m.deleted_at && !isPending(m))
     const grouping = this.settings.messageGrouping
     // Which (channel, period) files were touched? A period is a month, week, or day per the setting.
+    // Also remember which messages referenced each channel, so a failing getChannel can name them.
     const touched = new Map<string, Set<string>>()
+    const msgsByChannel = new Map<string, CarbonVoiceMessage[]>()
     for (const m of live) {
       const period = periodKey(m.created_at, grouping)
       for (const ch of m.channel_ids) {
         if (!touched.has(ch)) touched.set(ch, new Set())
         touched.get(ch)!.add(period)
+        if (!msgsByChannel.has(ch)) msgsByChannel.set(ch, [])
+        msgsByChannel.get(ch)!.push(m)
       }
     }
 
@@ -450,6 +454,18 @@ export class CarbonVoiceSync {
     for (const [ch, periods] of touched) {
       let channel = channelCache.get(ch)
       if (!channel) {
+        // Log the messages that drove this channel fetch (with status / deleted_at) so a failure
+        // here — e.g. a 403 on a channel deleted on the backend — can be traced to its messages.
+        const refs = msgsByChannel.get(ch) ?? []
+        console.log(
+          `Carbon Voice: fetching channel ${ch}, referenced by ${refs.length} message(s):`,
+          refs.map(m => ({
+            message_id: m.message_id,
+            status: m.status,
+            deleted_at: m.deleted_at,
+            created_at: m.created_at,
+          }))
+        )
         channel = await api.getChannel(ch)
         channelCache.set(ch, channel)
       }
