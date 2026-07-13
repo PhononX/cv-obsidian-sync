@@ -43,6 +43,28 @@ views:
       - conversation_link
 `
 
+// Ready-made "All Voice Memos" Bases view, written into the Voice Memos folder. Selects voice-memo
+// notes by their tag and lists them newest-first with the memo's key fields. `file.name` is the
+// clickable column that opens the memo note; `memo_link` is the external Carbon Voice deeplink.
+const VOICE_MEMOS_BASE = `filters:
+  and:
+    - file.hasTag("voice-memo")
+views:
+  - type: table
+    name: All voice memos
+    order:
+      - file.name
+      - workspace_name
+      - cv_folder
+      - date
+      - duration
+      - title
+      - memo_link
+    sort:
+      - property: date
+        direction: DESC
+`
+
 export class CarbonVoiceSync {
   constructor(private plugin: CarbonVoiceSyncPlugin) {}
 
@@ -58,7 +80,7 @@ export class CarbonVoiceSync {
   // Forward incremental sync. First run only sets the baseline (no historical pull).
   async syncIncremental(): Promise<SyncResult> {
     const api = new CarbonVoiceAPI(this.settings.apiToken)
-    await this.ensureConversationsView()
+    await this.ensureBaseViews()
     // Capture the baseline before fetching: any message updated during this run then gets
     // re-pulled next time rather than being skipped. Status changes bump last_updated_at, so
     // a message that goes `active` (transcript ready) after we saw it will resync on its own.
@@ -91,7 +113,7 @@ export class CarbonVoiceSync {
     voiceMemoWindow: HistoryWindow
   ): Promise<SyncResult> {
     const api = new CarbonVoiceAPI(this.settings.apiToken)
-    await this.ensureConversationsView()
+    await this.ensureBaseViews()
     const convSince = this.windowToSince(conversationWindow)
     const memoSince = this.windowToSince(voiceMemoWindow)
     // Fetch once over the larger of the two windows, then filter each category by its own.
@@ -699,11 +721,13 @@ export class CarbonVoiceSync {
     }
   }
 
-  // Writes the ready-made "Conversations by Date" Bases view into the sync folder once, so the
-  // by-date/recency table ships with the plugin. Create-if-absent: never overwrites, so a user's
-  // edits (or deletion) stick. Requires Obsidian's core Bases plugin to render.
-  private async ensureConversationsView(): Promise<void> {
+  // Writes the ready-made Bases views into the vault once — "Conversations by Date" at the sync
+  // root and "All Voice Memos" inside the Voice Memos folder — so they ship with the plugin.
+  // Create-if-absent: never overwrites, so a user's edits (or deletion) stick. Requires Obsidian's
+  // core Bases plugin to render.
+  private async ensureBaseViews(): Promise<void> {
     await this.createIfAbsent(`${this.root()}/Conversations by Date.base`, CONVERSATIONS_BASE)
+    await this.createIfAbsent(`${this.root()}/Voice Memos/All Voice Memos.base`, VOICE_MEMOS_BASE)
   }
 
   // Writes a conversation "home" note at the folder root: identity/metadata up top, an embedded

@@ -40,6 +40,7 @@ export class CarbonVoiceView extends ItemView {
 
     const s = this.plugin.settings
 
+    // Account + last-sync status, with the Sync button on the same row.
     new Setting(contentEl)
       .setName(s.apiToken ? s.connectedUserName || 'Connected' : 'Not connected')
       .setDesc(
@@ -47,26 +48,19 @@ export class CarbonVoiceView extends ItemView {
           ? `Last synced ${new Date(s.lastSyncTimestamp).toLocaleString()}`
           : 'Not synced yet'
       )
-
-    new Setting(contentEl).setName('Sync now').setDesc('Pull new activity').addButton(btn =>
-      btn
-        .setButtonText('Sync')
-        .setCta()
-        .onClick(async () => {
-          await this.plugin.runSync()
-          this.render()
-        })
-    )
-
-    new Setting(contentEl)
-      .setName('Import history')
-      .setDesc('Fetch older data for the configured windows')
       .addButton(btn =>
-        btn.setButtonText('Import').onClick(async () => {
-          await this.plugin.runImport()
-          this.render()
-        })
+        btn
+          .setButtonText('Sync')
+          .setCta()
+          .onClick(async () => {
+            await this.plugin.runSync()
+            this.render()
+          })
       )
+
+    new Setting(contentEl).setName('Settings').addButton(btn =>
+      btn.setButtonText('Open').onClick(() => this.plugin.openSettings())
+    )
 
     new Setting(contentEl)
       .setName('Conversations by date')
@@ -78,8 +72,14 @@ export class CarbonVoiceView extends ItemView {
         })
       )
 
-    new Setting(contentEl).setName('Settings').addButton(btn =>
-      btn.setButtonText('Open').onClick(() => this.plugin.openSettings())
-    )
+    new Setting(contentEl)
+      .setName('Voice memos')
+      .setDesc('Open the "All Voice Memos" Bases view (needs the core Bases plugin)')
+      .addButton(btn =>
+        btn.setButtonText('Open').onClick(() => {
+          const root = s.syncFolder.trim() || 'Carbon Voice'
+          this.app.workspace.openLinkText(`${root}/Voice Memos/All Voice Memos.base`, '', true)
+        })
+      )
   }
 }
