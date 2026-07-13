@@ -841,9 +841,10 @@ export class CarbonVoiceSync {
         '',
         `# ${name}`,
         '',
-        '> Auto-created by Carbon Voice Sync. Add your own notes here — a later sync never overwrites',
-        '> this file. The table below lists every conversation this person takes part in, newest first;',
-        '> the backlinks pane also catches voice memos they appear in.',
+        '> Auto-created by Carbon Voice Sync. ',
+        '> Add your own notes here — a later sync never overwrites this file',
+        '> The table below lists every conversation this person takes part in (Last used first)',
+        '> Open the backlinks pane to see see links to all their messages.',
         '',
         // Embedded Bases view (core Bases plugin, 1.9+). Scoped to this person via the plain-text
         // `participant_names` on conversation notes, and to period notes via `grouping` so conversation
