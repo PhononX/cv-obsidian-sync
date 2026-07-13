@@ -36,9 +36,7 @@ views:
       property: date
       direction: DESC
     order:
-      - file.name
-      - conversation_name
-      - conversation_note
+      - conversation
       - workspace_name
       - message_count
       - last_message_at
@@ -444,9 +442,10 @@ export class CarbonVoiceSync {
       `cv_conversation_id: ${channel.channel_guid}`,
       `conversation_link: https://carbonvoice.app/c/${channel.channel_guid}`,
       `conversation_name: ${yaml(title)}`,
-      // Link back to the conversation "home" note, so a by-date Bases row can jump to the whole
-      // conversation (the stand-in for its folder).
-      `conversation_note: ${yaml(`[[${indexBase}|${title}]]`)}`,
+      // The conversation name stored as a link to its "home" note: one column that shows the name
+      // and clicks through to the whole conversation (the stand-in for its folder). The plain
+      // `conversation_name` above stays for search/other queries.
+      `conversation: ${yaml(`[[${indexBase}|${title}]]`)}`,
       `workspace_name: ${yaml(wsName)}`,
       `workspace_id: ${channel.workspace_guid}`,
     ]
