@@ -131,7 +131,9 @@
 
 .cv-account-email.mod-has-more {
   cursor: help;
-  text-decoration: underline dotted var(--text-muted);
+  text-decoration-line: underline;
+  text-decoration-style: dotted;
+  text-decoration-color: var(--text-muted);
 }
 
 .cv-desc-error {
