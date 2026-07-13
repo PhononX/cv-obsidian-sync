@@ -58,7 +58,7 @@ views:
       - cv_folder
       - date
       - duration
-      - title
+      - summary
       - memo_link
     sort:
       - property: date
