@@ -71,5 +71,15 @@ export class CarbonVoiceView extends ItemView {
           this.app.workspace.openLinkText(`${root}/Conversations by Date.base`, '', true)
         })
       )
+
+    new Setting(contentEl)
+      .setName('Voice memos')
+      .setDesc('Open the "All Voice Memos" Bases view (needs the core Bases plugin)')
+      .addButton(btn =>
+        btn.setButtonText('Open Voice Memos').onClick(() => {
+          const root = s.syncFolder.trim() || 'Carbon Voice'
+          this.app.workspace.openLinkText(`${root}/Voice Memos/All Voice Memos.base`, '', true)
+        })
+      )
   }
 }
