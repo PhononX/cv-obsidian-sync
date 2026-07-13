@@ -202,6 +202,18 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
       )
 
     new Setting(containerEl)
+      .setName('Sync on startup')
+      .setDesc('Automatically sync when Obsidian opens')
+      .addToggle(toggle =>
+        toggle
+          .setValue(this.plugin.settings.syncOnStartup)
+          .onChange(async value => {
+            this.plugin.settings.syncOnStartup = value
+            await this.plugin.saveSettings()
+          })
+      )
+
+    new Setting(containerEl)
       .setName('Sync folder')
       .setDesc('Root vault folder where all synced content is written')
       .addText(text =>
@@ -270,18 +282,6 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.audioMode)
           .onChange(async value => {
             this.plugin.settings.audioMode = value as AudioMode
-            await this.plugin.saveSettings()
-          })
-      )
-
-    new Setting(containerEl)
-      .setName('Sync on startup')
-      .setDesc('Automatically sync when Obsidian opens')
-      .addToggle(toggle =>
-        toggle
-          .setValue(this.plugin.settings.syncOnStartup)
-          .onChange(async value => {
-            this.plugin.settings.syncOnStartup = value
             await this.plugin.saveSettings()
           })
       )
