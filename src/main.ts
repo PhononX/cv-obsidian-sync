@@ -37,7 +37,7 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
     this.registerSyncInterval()
 
     if (this.settings.syncOnStartup && this.settings.apiToken) {
-      this.runSync()
+      void this.runSync()
     }
   }
 
@@ -125,7 +125,7 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
       leaf = workspace.getLeaf('tab')
       await leaf.setViewState({ type: CARBON_VOICE_VIEW, active: true })
     }
-    workspace.revealLeaf(leaf)
+    await workspace.revealLeaf(leaf)
     if (this.settings.apiToken) void this.runSync()
   }
 
@@ -154,7 +154,7 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
     if (minutes && minutes > 0) {
       this.syncIntervalId = window.setInterval(
         () => {
-          if (this.settings.apiToken) this.runSync()
+          if (this.settings.apiToken) void this.runSync()
         },
         minutes * 60 * 1000
       )
@@ -163,7 +163,8 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
   }
 
   async loadSettings() {
-    const data: Record<string, unknown> = { ...((await this.loadData()) ?? {}) }
+    const loaded = (await this.loadData()) as Record<string, unknown> | null
+    const data: Record<string, unknown> = { ...(loaded ?? {}) }
     // Migrate the earlier boolean `downloadAudio` toggle to the `audioMode` setting.
     if (data.audioMode == null && typeof data.downloadAudio === 'boolean') {
       data.audioMode = data.downloadAudio ? 'download' : 'off'

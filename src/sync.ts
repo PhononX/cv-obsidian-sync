@@ -266,7 +266,7 @@ export class CarbonVoiceSync {
   private async memoIdAt(path: string): Promise<string | null> {
     const f = this.app.vault.getAbstractFileByPath(path)
     if (!(f instanceof TFile)) return null
-    const cached = this.app.metadataCache.getFileCache(f)?.frontmatter?.cv_memo_id
+    const cached: unknown = this.app.metadataCache.getFileCache(f)?.frontmatter?.cv_memo_id
     if (typeof cached === 'string') return cached
     const match = (await this.app.vault.read(f)).match(/^cv_memo_id:\s*(\S+)/m)
     return match ? match[1] : null
@@ -300,7 +300,7 @@ export class CarbonVoiceSync {
     if (!(folder instanceof TFolder)) return null
     for (const child of folder.children) {
       if (!(child instanceof TFile) || child.extension !== 'md') continue
-      const cached = this.app.metadataCache.getFileCache(child)?.frontmatter?.cv_conversation_id
+      const cached: unknown = this.app.metadataCache.getFileCache(child)?.frontmatter?.cv_conversation_id
       if (typeof cached === 'string') return cached
       const match = (await this.app.vault.read(child)).match(/^cv_conversation_id:\s*(\S+)/m)
       if (match) return match[1]
@@ -702,13 +702,27 @@ export class CarbonVoiceSync {
   }
 
   // Finds the note occupying `path` on a case-insensitive filesystem when the exact-case index
-  // lookup missed. Returns null when no file (folders don't count) matches.
+  // lookup missed. The on-disk collision can differ in case at any segment (folder or leaf), so we
+  // descend the tree one level at a time, matching each segment against the current folder's
+  // children case-insensitively. This resolves the same file the old whole-vault scan did without
+  // ever enumerating the entire vault — each step only inspects the children of the folder we're
+  // already inside. Returns null when no note (folders don't count) occupies the path.
   private resolveCaseInsensitive(path: string): TFile | null {
-    const lower = path.toLowerCase()
-    for (const f of this.app.vault.getFiles()) {
-      if (f.path.toLowerCase() === lower) return f
+    const segments = normalizePath(path).split('/')
+    let folder: TFolder = this.app.vault.getRoot()
+    for (let depth = 0; depth < segments.length - 1; depth++) {
+      const wanted = segments[depth].toLowerCase()
+      const sub = folder.children.find(
+        (c): c is TFolder => c instanceof TFolder && c.name.toLowerCase() === wanted,
+      )
+      if (!sub) return null
+      folder = sub
     }
-    return null
+    const leaf = segments[segments.length - 1].toLowerCase()
+    const file = folder.children.find(
+      (c): c is TFile => c instanceof TFile && c.name.toLowerCase() === leaf,
+    )
+    return file ?? null
   }
 
   private async ensureFolder(dir: string): Promise<void> {
@@ -1022,7 +1036,7 @@ function sanitize(name: string): string {
 
 // Minimal YAML string escaping for frontmatter scalar values.
 function yaml(value: string): string {
-  if (/[:#\[\]{}",&*!|>'%@`]/.test(value) || value.trim() !== value) {
+  if (/[:#[\]{}",&*!|>'%@`]/.test(value) || value.trim() !== value) {
     return `"${value.replace(/"/g, '\\"')}"`
   }
   return value
