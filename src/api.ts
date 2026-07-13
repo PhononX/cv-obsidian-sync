@@ -59,32 +59,34 @@ export interface FolderQueryParams {
 export class CarbonVoiceAPI {
   constructor(private token: string) {}
 
-  private async get<T>(path: string): Promise<T> {
-    const res = await requestUrl({
-      url: `${BASE_URL}${path}`,
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        'Content-Type': 'application/json',
-      },
-    })
-    if (res.status === 401) throw new Error('Invalid API token')
-    if (res.status < 200 || res.status >= 300) throw new Error(`API error ${res.status}`)
-    return res.json as T
+  private get<T>(path: string): Promise<T> {
+    return this.request<T>('GET', path)
   }
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
+  private post<T>(path: string, body: unknown): Promise<T> {
+    return this.request<T>('POST', path, body)
+  }
+
+  // Single request path so every failure names the endpoint that produced it. `throw: false` keeps
+  // Obsidian from raising a bare "Request failed, status N" before we can attach the method + path,
+  // which is otherwise impossible to trace across a large import. On error we also log the response
+  // body to the developer console (Ctrl/Cmd+Shift+I) — it usually explains *why* (e.g. a 403).
+  private async request<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
     const res = await requestUrl({
       url: `${BASE_URL}${path}`,
-      method: 'POST',
+      method,
       headers: {
         Authorization: `Bearer ${this.token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(body),
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      throw: false,
     })
-    if (res.status === 401) throw new Error('Invalid API token')
-    if (res.status < 200 || res.status >= 300) throw new Error(`API error ${res.status}`)
+    if (res.status === 401) throw new Error(`Invalid API token (${method} ${path})`)
+    if (res.status < 200 || res.status >= 300) {
+      console.error(`Carbon Voice API error ${res.status} on ${method} ${path}`, res.text)
+      throw new Error(`API error ${res.status} on ${method} ${path}`)
+    }
     return res.json as T
   }
 
