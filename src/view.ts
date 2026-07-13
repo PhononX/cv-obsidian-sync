@@ -71,7 +71,7 @@ export class CarbonVoiceView extends ItemView {
       .addButton(btn =>
         btn.setButtonText('Open').onClick(() => {
           const root = s.syncFolder.trim() || 'Carbon Voice'
-          this.app.workspace.openLinkText(`${root}/Conversations by Date.base`, '', true)
+          void this.app.workspace.openLinkText(`${root}/Conversations by Date.base`, '', true)
         })
       )
 
@@ -81,7 +81,7 @@ export class CarbonVoiceView extends ItemView {
       .addButton(btn =>
         btn.setButtonText('Open').onClick(() => {
           const root = s.syncFolder.trim() || 'Carbon Voice'
-          this.app.workspace.openLinkText(`${root}/All Voice Memos.base`, '', true)
+          void this.app.workspace.openLinkText(`${root}/All Voice Memos.base`, '', true)
         })
       )
   }

@@ -4,7 +4,6 @@ import type {
   CarbonVoiceMessage,
   CarbonVoiceMessageV5,
   CarbonVoiceChannel,
-  CarbonVoiceWorkspace,
   GetWorkspacesResponse,
   CarbonVoiceFolder,
   ListFoldersResponse,
