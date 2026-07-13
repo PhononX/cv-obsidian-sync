@@ -1,4 +1,4 @@
-import { App, Modal, Notice, PluginSettingTab, Setting } from 'obsidian'
+import { App, Modal, PluginSettingTab, Setting } from 'obsidian'
 import type CarbonVoiceSyncPlugin from './main'
 import { CarbonVoiceAPI } from './api'
 import type {
@@ -21,13 +21,13 @@ const WORKSPACE_PAGE_SIZE = 100
 
 class TokenModal extends Modal {
   private token: string
-  private onSuccess: (token: string, user: CarbonVoiceUser) => void
+  private onSuccess: (token: string, user: CarbonVoiceUser) => void | Promise<void>
   private statusEl: HTMLElement | null = null
 
   constructor(
     app: App,
     existingToken: string,
-    onSuccess: (token: string, user: CarbonVoiceUser) => void
+    onSuccess: (token: string, user: CarbonVoiceUser) => void | Promise<void>
   ) {
     super(app)
     this.token = existingToken
@@ -76,7 +76,7 @@ class TokenModal extends Modal {
             try {
               const api = new CarbonVoiceAPI(this.token)
               const user = await api.getCurrentUser()
-              this.onSuccess(this.token, user)
+              await this.onSuccess(this.token, user)
               this.close()
             } catch (err) {
               const msg = err instanceof Error ? err.message : 'Unknown error'
@@ -180,7 +180,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
         connectedUserAvatarUrl ?? null
       )
 
-      this.validateToken(accountSetting.descEl, accountSetting.nameEl)
+      void this.validateToken(accountSetting.descEl, accountSetting.nameEl)
     }
 
     // ── Sync ────────────────────────────────────────────────────────────────

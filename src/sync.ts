@@ -266,7 +266,7 @@ export class CarbonVoiceSync {
   private async memoIdAt(path: string): Promise<string | null> {
     const f = this.app.vault.getAbstractFileByPath(path)
     if (!(f instanceof TFile)) return null
-    const cached = this.app.metadataCache.getFileCache(f)?.frontmatter?.cv_memo_id
+    const cached: unknown = this.app.metadataCache.getFileCache(f)?.frontmatter?.cv_memo_id
     if (typeof cached === 'string') return cached
     const match = (await this.app.vault.read(f)).match(/^cv_memo_id:\s*(\S+)/m)
     return match ? match[1] : null
@@ -300,7 +300,7 @@ export class CarbonVoiceSync {
     if (!(folder instanceof TFolder)) return null
     for (const child of folder.children) {
       if (!(child instanceof TFile) || child.extension !== 'md') continue
-      const cached = this.app.metadataCache.getFileCache(child)?.frontmatter?.cv_conversation_id
+      const cached: unknown = this.app.metadataCache.getFileCache(child)?.frontmatter?.cv_conversation_id
       if (typeof cached === 'string') return cached
       const match = (await this.app.vault.read(child)).match(/^cv_conversation_id:\s*(\S+)/m)
       if (match) return match[1]
@@ -709,20 +709,20 @@ export class CarbonVoiceSync {
   // already inside. Returns null when no note (folders don't count) occupies the path.
   private resolveCaseInsensitive(path: string): TFile | null {
     const segments = normalizePath(path).split('/')
-    let node: TFolder = this.app.vault.getRoot()
-    for (let i = 0; i < segments.length; i++) {
-      const wanted = segments[i].toLowerCase()
-      const last = i === segments.length - 1
-      const match = node.children.find((c) =>
-        last
-          ? c instanceof TFile && c.name.toLowerCase() === wanted
-          : c instanceof TFolder && c.name.toLowerCase() === wanted,
+    let folder: TFolder = this.app.vault.getRoot()
+    for (let depth = 0; depth < segments.length - 1; depth++) {
+      const wanted = segments[depth].toLowerCase()
+      const sub = folder.children.find(
+        (c): c is TFolder => c instanceof TFolder && c.name.toLowerCase() === wanted,
       )
-      if (!match) return null
-      if (last) return match as TFile
-      node = match as TFolder
+      if (!sub) return null
+      folder = sub
     }
-    return null
+    const leaf = segments[segments.length - 1].toLowerCase()
+    const file = folder.children.find(
+      (c): c is TFile => c instanceof TFile && c.name.toLowerCase() === leaf,
+    )
+    return file ?? null
   }
 
   private async ensureFolder(dir: string): Promise<void> {
@@ -1036,7 +1036,7 @@ function sanitize(name: string): string {
 
 // Minimal YAML string escaping for frontmatter scalar values.
 function yaml(value: string): string {
-  if (/[:#\[\]{}",&*!|>'%@`]/.test(value) || value.trim() !== value) {
+  if (/[:#[\]{}",&*!|>'%@`]/.test(value) || value.trim() !== value) {
     return `"${value.replace(/"/g, '\\"')}"`
   }
   return value
