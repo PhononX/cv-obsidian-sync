@@ -110,6 +110,8 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
 
   // Opens (or reveals) the Carbon Voice panel as a tab in the main editor area. Reuses an existing
   // Carbon Voice leaf if one is already open (sidebar or main) rather than spawning duplicates.
+  // Kicks off a sync on open so the panel reflects fresh data (skipped when no token is set;
+  // runSync itself no-ops if a sync is already running).
   async activateView(): Promise<void> {
     const { workspace } = this.app
     let leaf = workspace.getLeavesOfType(CARBON_VOICE_VIEW)[0]
@@ -118,6 +120,7 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
       await leaf.setViewState({ type: CARBON_VOICE_VIEW, active: true })
     }
     workspace.revealLeaf(leaf)
+    if (this.settings.apiToken) void this.runSync()
   }
 
   // Re-renders any open panel so its status line stays live after a sync from anywhere.
