@@ -108,14 +108,14 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
     }
   }
 
-  // Opens (or reveals) the Carbon Voice panel in a right-hand leaf.
+  // Opens (or reveals) the Carbon Voice panel as a tab in the main editor area. Reuses an existing
+  // Carbon Voice leaf if one is already open (sidebar or main) rather than spawning duplicates.
   async activateView(): Promise<void> {
     const { workspace } = this.app
     let leaf = workspace.getLeavesOfType(CARBON_VOICE_VIEW)[0]
     if (!leaf) {
-      const right = workspace.getRightLeaf(false) ?? workspace.getLeaf(true)
-      await right.setViewState({ type: CARBON_VOICE_VIEW, active: true })
-      leaf = right
+      leaf = workspace.getLeaf('tab')
+      await leaf.setViewState({ type: CARBON_VOICE_VIEW, active: true })
     }
     workspace.revealLeaf(leaf)
   }
