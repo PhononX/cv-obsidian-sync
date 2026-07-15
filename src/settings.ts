@@ -257,6 +257,20 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
       )
 
     new Setting(containerEl)
+      .setName('Include AI responses')
+      .setDesc(
+        'Pull the AI responses attached to a message (e.g. summaries, action items) into the note'
+      )
+      .addToggle(toggle =>
+        toggle
+          .setValue(this.plugin.settings.includeAiResponses)
+          .onChange(async value => {
+            this.plugin.settings.includeAiResponses = value
+            await this.plugin.saveSettings()
+          })
+      )
+
+    new Setting(containerEl)
       .setName('Link people & workspaces')
       .setDesc(
         'Create People and Workspace notes and link participants, senders and workspaces so the graph and backlinks connect everything'

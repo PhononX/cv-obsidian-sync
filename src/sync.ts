@@ -5,11 +5,19 @@ import type {
   CarbonVoiceMessage,
   CarbonVoiceChannel,
   CarbonVoiceFolder,
+  CarbonVoiceAiResponse,
   HistoryWindow,
   MessageGrouping,
 } from './types'
 import { ASYNC_MEETING_PREFIX } from './types'
 import { formatTranscript } from './transcript-format'
+
+// One AI response rendered for a note: the prompt that produced it (used as a heading) and its
+// body as Markdown. Built by fetchAiResponses from a message's ai_response_ids.
+interface RenderedAiResponse {
+  promptName: string
+  body: string
+}
 
 export interface SyncResult {
   firstRun: boolean
@@ -111,12 +119,13 @@ export class CarbonVoiceSync {
     progress.phase = 'writing'
     const memos = messages.filter(m => this.isVoiceMemo(m) && this.memoInScope(m))
     const convMsgs = await this.selectConversationMessages(api, messages)
+    const promptNames = await this.fetchPromptNames(api)
 
-    const voiceMemos = await this.processVoiceMemos(api, memos, () => {
+    const voiceMemos = await this.processVoiceMemos(api, memos, promptNames, () => {
       progress.voiceMemos++
       onProgress?.(progress)
     })
-    const conversations = await this.processConversations(api, convMsgs, () => {
+    const conversations = await this.processConversations(api, convMsgs, promptNames, () => {
       progress.conversations++
       onProgress?.(progress)
     })
@@ -146,18 +155,19 @@ export class CarbonVoiceSync {
       onProgress?.(progress)
     })
     progress.phase = 'writing'
+    const promptNames = await this.fetchPromptNames(api)
 
     const memoMsgs = messages.filter(
       m => m.created_at >= memoSince && this.isVoiceMemo(m) && this.memoInScope(m)
     )
-    const voiceMemos = await this.processVoiceMemos(api, memoMsgs, () => {
+    const voiceMemos = await this.processVoiceMemos(api, memoMsgs, promptNames, () => {
       progress.voiceMemos++
       onProgress?.(progress)
     })
 
     const convCandidates = messages.filter(m => m.created_at >= convSince)
     const convMsgs = await this.selectConversationMessages(api, convCandidates)
-    const conversations = await this.processConversations(api, convMsgs, () => {
+    const conversations = await this.processConversations(api, convMsgs, promptNames, () => {
       progress.conversations++
       onProgress?.(progress)
     })
@@ -240,6 +250,7 @@ export class CarbonVoiceSync {
   private async processVoiceMemos(
     api: CarbonVoiceAPI,
     memos: CarbonVoiceMessage[],
+    promptNames: Map<string, string>,
     onTick?: () => void
   ): Promise<number> {
     const live = memos.filter(m => !m.deleted_at && !isPending(m))
@@ -252,6 +263,8 @@ export class CarbonVoiceSync {
     // Tracks the note path each memo claimed this run, so two same-titled memos in one import
     // don't fight over one file — the second is disambiguated instead of overwriting the first.
     const claimed = new Map<string, string>()
+    // Dedupes /responses fetches across memos that share an AI response.
+    const aiCache = new Map<string, RenderedAiResponse | null>()
     for (const m of live) {
       const transcript = messageTranscript(m)
       const summary = extractText(m, 'summary')
@@ -266,11 +279,14 @@ export class CarbonVoiceSync {
       }
       const audioPath =
         this.settings.audioMode === 'download' ? await this.ensureAudio(api, m) : null
+      const aiResponses = await this.fetchAiResponses(api, m, promptNames, aiCache)
       const basePath = `${this.root()}/Voice Memos/${subpath}/${sanitize(title)}.md`
       const path = await this.resolveMemoNotePath(basePath, m, claimed)
       await this.upsertFile(
         path,
-        this.buildVoiceMemoNote(m, subpath, title, transcript, summary, wsName, creatorName, audioPath)
+        this.buildVoiceMemoNote(
+          m, subpath, title, transcript, summary, wsName, creatorName, audioPath, aiResponses
+        )
       )
       count++
       onTick?.()
@@ -378,7 +394,8 @@ export class CarbonVoiceSync {
     summary: string | null,
     wsName: string,
     creatorName: string,
-    audioPath: string | null
+    audioPath: string | null,
+    aiResponses: RenderedAiResponse[]
   ): string {
     const link = this.settings.linkNotes
     const durationSec = Math.round((m.duration_ms ?? 0) / 1000)
@@ -408,6 +425,10 @@ export class CarbonVoiceSync {
         : '> No transcript available yet.'
       body.push('## Transcript', readable, '')
     }
+    if (aiResponses.length) {
+      body.push('## AI Responses', '')
+      for (const r of aiResponses) body.push(`### ${r.promptName}`, r.body, '')
+    }
     body.push(...this.audioBlock(m, audioPath))
 
     body.push('## Metadata')
@@ -428,10 +449,13 @@ export class CarbonVoiceSync {
   private async processConversations(
     api: CarbonVoiceAPI,
     convMsgs: CarbonVoiceMessage[],
+    promptNames: Map<string, string>,
     onTick?: () => void
   ): Promise<number> {
     const live = convMsgs.filter(m => !m.deleted_at && !isPending(m))
     const grouping = this.settings.messageGrouping
+    // Dedupes /responses fetches across the run's messages/periods.
+    const aiCache = new Map<string, RenderedAiResponse | null>()
     // Which (channel, period) files were touched? A period is a month, week, or day per the setting.
     const touched = new Map<string, Set<string>>()
     for (const m of live) {
@@ -481,10 +505,15 @@ export class CarbonVoiceSync {
           this.settings.audioMode === 'download'
             ? await this.collectAudio(api, msgs)
             : new Map<string, string>()
+        const aiResponses = new Map<string, RenderedAiResponse[]>()
+        for (const m of msgs) {
+          const rendered = await this.fetchAiResponses(api, m, promptNames, aiCache)
+          if (rendered.length) aiResponses.set(m.message_id, rendered)
+        }
         const path = `${folder}/${periodFileLabel(period, grouping)}`
         await this.upsertFile(
           path,
-          this.buildConversationNote(channel, period, grouping, indexBase, msgs, audioPaths)
+          this.buildConversationNote(channel, period, grouping, indexBase, msgs, audioPaths, aiResponses)
         )
         count++
         onTick?.()
@@ -499,7 +528,8 @@ export class CarbonVoiceSync {
     grouping: MessageGrouping,
     indexBase: string,
     messages: CarbonVoiceMessage[],
-    audioPaths: Map<string, string>
+    audioPaths: Map<string, string>,
+    aiResponses: Map<string, RenderedAiResponse[]>
   ): string {
     const link = this.settings.linkNotes
     const nameById = new Map<string, string>()
@@ -572,6 +602,9 @@ export class CarbonVoiceSync {
           ''
         )
         body.push(...this.audioBlock(m, audioPaths.get(m.message_id) ?? null))
+        for (const r of aiResponses.get(m.message_id) ?? []) {
+          body.push(`**🤖 ${r.promptName}**`, '', r.body, '')
+        }
         // Precise UTC timestamp (searchable with ⌘-Shift-F, unlike the local heading) plus a
         // stable block id derived from the message id, so a single message can be deep-linked or
         // bookmarked: [[<period> Messages#^cv-<id>]]. The id is deterministic, so it survives
@@ -723,6 +756,58 @@ export class CarbonVoiceSync {
       cursor = res.next_cursor
     }
     return map
+  }
+
+  // ── AI responses ───────────────────────────────────────────────────────────
+
+  // prompt_id → display name, so a response can be headed by the prompt that produced it
+  // (e.g. "Action Items"). Fetched once per run. Empty when AI responses are disabled or the
+  // call fails — responses then fall back to a generic "AI Response" heading.
+  private async fetchPromptNames(api: CarbonVoiceAPI): Promise<Map<string, string>> {
+    if (!this.settings.includeAiResponses) return new Map()
+    try {
+      const prompts = await api.getPrompts()
+      const map = new Map<string, string>()
+      for (const p of prompts) if (p.id) map.set(p.id, p.name?.trim() || p.id)
+      return map
+    } catch (err) {
+      console.warn('Carbon Voice: could not fetch prompt names', err)
+      return new Map()
+    }
+  }
+
+  // Fetches and renders the AI responses referenced by a message (its ai_response_ids). Returns []
+  // when the feature is off or the message has none. Each id is fetched at most once per run via
+  // `cache` — a response can be attached to several messages. Failures are logged and skipped so a
+  // single bad response never aborts the sync.
+  private async fetchAiResponses(
+    api: CarbonVoiceAPI,
+    m: CarbonVoiceMessage,
+    promptNames: Map<string, string>,
+    cache: Map<string, RenderedAiResponse | null>
+  ): Promise<RenderedAiResponse[]> {
+    if (!this.settings.includeAiResponses) return []
+    const out: RenderedAiResponse[] = []
+    for (const ref of m.ai_response_ids ?? []) {
+      let rendered = cache.get(ref.id)
+      if (rendered === undefined) {
+        rendered = null
+        try {
+          const resp = await api.getResponse(ref.id)
+          const body = renderAiResponseBody(resp)
+          if (body) {
+            const name =
+              promptNames.get(ref.prompt_id) || promptNames.get(resp.prompt_id) || 'AI Response'
+            rendered = { promptName: name, body }
+          }
+        } catch (err) {
+          console.warn(`Carbon Voice: could not fetch AI response ${ref.id}`, err)
+        }
+        cache.set(ref.id, rendered)
+      }
+      if (rendered) out.push(rendered)
+    }
+    return out
   }
 
   // ── Vault helpers ─────────────────────────────────────────────────────────
@@ -1020,6 +1105,23 @@ export class CarbonVoiceSync {
 
 function channelName(c: CarbonVoiceChannel): string {
   return c.channel_name?.trim() || `Conversation ${c.channel_guid.slice(0, 8)}`
+}
+
+// The Markdown body for one AI response. A response holds a variant per language; we take the
+// first that renders something, preferring Markdown, then plain text, then a fenced JSON dump of a
+// structured (json-format) response. HTML-only variants are skipped to avoid dumping raw HTML into
+// the note. Returns null when nothing renders.
+function renderAiResponseBody(resp: CarbonVoiceAiResponse): string | null {
+  for (const v of resp.responses ?? []) {
+    const md = v.markdown?.trim()
+    if (md) return md
+    const txt = v.text?.trim()
+    if (txt) return txt
+    if (v.json && Object.keys(v.json).length) {
+      return '```json\n' + JSON.stringify(v.json, null, 2) + '\n```'
+    }
+  }
+  return null
 }
 
 function workspaceName(c: CarbonVoiceChannel): string {

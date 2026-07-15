@@ -3,6 +3,12 @@ import type {
   CarbonVoiceUser,
   CarbonVoiceMessage,
   CarbonVoiceMessageV5,
+  CarbonVoiceMessageRecentV5,
+  CarbonVoiceAiResponse,
+  CarbonVoicePrompt,
+  CarbonVoiceAudioModel,
+  CarbonVoiceTextModel,
+  CarbonVoiceAttachment,
   CarbonVoiceChannel,
   GetWorkspacesResponse,
   CarbonVoiceFolder,
@@ -143,8 +149,35 @@ export class CarbonVoiceAPI {
 
   // Returns messages across all channels (or one channel via channel_id).
   // Voice memos have type === 'voicememo' and a folder_id.
+  //
+  // Backed by POST /v5/messages/recent — a lighter payload than the old v3 endpoint that also
+  // reports each message's AI responses (ai_response_ids). The v5 shape differs (single-valued
+  // conversation_id/workspace_id, direct transcript/ai_summary, a single audio object), so we
+  // normalise every row back into the CarbonVoiceMessage the sync engine consumes; the mapped
+  // message additionally carries `ai_response_ids`.
   async getRecentMessages(params: MessageQueryParams): Promise<CarbonVoiceMessage[]> {
-    return this.post<CarbonVoiceMessage[]>('/v3/messages/recent', params)
+    const body = {
+      date: params.date,
+      direction: params.direction,
+      use_last_updated: params.use_last_updated,
+      ...(params.limit != null ? { limit: params.limit } : {}),
+      // v5 names the conversation filter `conversation_id` where v3 used `channel_id`.
+      ...(params.channel_id ? { conversation_id: params.channel_id } : {}),
+    }
+    const rows = await this.post<CarbonVoiceMessageRecentV5[]>('/v5/messages/recent', body)
+    return rows.map(mapRecentV5ToMessage)
+  }
+
+  // ── AI responses & prompts ────────────────────────────────────────────────
+
+  // The AI responses generated for a message (one call per id from a message's ai_response_ids).
+  async getResponse(id: string): Promise<CarbonVoiceAiResponse> {
+    return this.get<CarbonVoiceAiResponse>(`/responses/${id}`)
+  }
+
+  // All prompts the account can see, used to label a response by the prompt that produced it.
+  async getPrompts(): Promise<CarbonVoicePrompt[]> {
+    return this.get<CarbonVoicePrompt[]>('/prompts')
   }
 
   // Downloads a binary asset (e.g. message audio) by URL. No Authorization header: the Carbon
@@ -165,5 +198,83 @@ export class CarbonVoiceAPI {
     const qs = params.toString() ? `?${params.toString()}` : ''
     const data = await this.get<{ message: CarbonVoiceMessageV5 }>(`/v5/messages/${id}${qs}`)
     return data.message
+  }
+}
+
+// Normalises a /v5/messages/recent row into the CarbonVoiceMessage the sync engine consumes. The
+// v5 payload is flatter: transcript and ai_summary are direct strings (re-expressed here as the
+// `transcript` / `summary` text models the engine reads), audio is a single object (re-expressed
+// as a one-entry audio_models list), and scope is single-valued (wrapped back into arrays). When
+// the payload omits `name` (not in the documented recent shape) a memo's title falls back to its
+// summary/transcript. The message's `ai_response_ids` are preserved for AI-response sync.
+function mapRecentV5ToMessage(r: CarbonVoiceMessageRecentV5): CarbonVoiceMessage {
+  const language = r.language ?? ''
+
+  // Prefer the direct transcript string; fall back to joining the per-word time codes (audio
+  // messages can carry the words there with an empty top-level transcript), matching v3 handling.
+  const transcript =
+    r.transcript?.trim() ||
+    (r.time_codes ?? [])
+      .map(tc => tc.t)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+  const textModels: CarbonVoiceTextModel[] = []
+  if (transcript) {
+    textModels.push({ type: 'transcript', audio_id: null, language_id: language, value: transcript })
+  }
+  if (r.ai_summary && r.ai_summary.trim()) {
+    textModels.push({ type: 'summary', audio_id: null, language_id: language, value: r.ai_summary })
+  }
+
+  const audioModels: CarbonVoiceAudioModel[] = []
+  const audioUrl = r.audio?.presigned_url || r.audio?.url || r.audio?.streaming_url || ''
+  if (audioUrl) {
+    audioModels.push({
+      _id: r.id,
+      url: audioUrl,
+      extension: null,
+      streaming: false,
+      language,
+      duration_ms: r.audio?.duration_ms ?? 0,
+      waveform_percentages: r.audio?.waveform_percentages ?? [],
+      is_original_audio: true,
+    })
+  }
+
+  const attachments: CarbonVoiceAttachment[] = (r.attachments ?? []).map(a => ({
+    _id: a.id,
+    creator_id: a.creator_id,
+    created_at: a.created_at,
+    type: a.type,
+    link: a.url,
+    filename: a.filename,
+    mime_type: a.mime_type,
+    length_in_bytes: a.length_in_bytes,
+  }))
+
+  return {
+    message_id: r.id,
+    creator_id: r.creator_id,
+    created_at: r.created_at,
+    deleted_at: r.deleted_at,
+    last_updated_at: r.updated_at || r.created_at,
+    workspace_ids: r.workspace_id ? [r.workspace_id] : [],
+    channel_ids: r.conversation_id ? [r.conversation_id] : [],
+    parent_message_id: r.parent_message_id,
+    name: r.name ?? null,
+    // Only an `audio` kind is an audio message; everything else (text, ai-*, action items…) is
+    // rendered as text so it never shows a phantom duration or audio player.
+    is_text_message: r.kind !== 'audio',
+    status: r.status,
+    type: r.type,
+    folder_id: r.folder_id,
+    duration_ms: r.audio?.duration_ms ?? 0,
+    audio_models: audioModels,
+    text_models: textModels,
+    attachments,
+    notes: '',
+    ai_response_ids: r.ai_response_ids ?? [],
   }
 }

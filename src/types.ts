@@ -81,6 +81,15 @@ export interface CarbonVoiceAttachment {
   length_in_bytes: number | null
 }
 
+// Reference to an AI response generated for a message. Carried on the recent-list payload
+// (v5) so we know which responses exist without a separate lookup; the response body itself is
+// fetched on demand via GET /responses/{id}. `prompt_id` names the prompt that produced it —
+// resolved to a human label via GET /prompts.
+export interface CarbonVoiceAiResponseRef {
+  id: string
+  prompt_id: string
+}
+
 export interface CarbonVoiceMessage {
   message_id: string
   creator_id: string
@@ -100,6 +109,8 @@ export interface CarbonVoiceMessage {
   text_models: CarbonVoiceTextModel[]
   attachments: CarbonVoiceAttachment[]
   notes: string
+  // AI responses attached to this message (from the v5 recent payload). Empty when none exist.
+  ai_response_ids: CarbonVoiceAiResponseRef[]
 }
 
 // Messages (v5 — used by /v5/messages/{id}, richer shape)
@@ -146,6 +157,87 @@ export interface CarbonVoiceMessageV5 {
   conversation_sequence: number | null
   source_message_id: string | null
   link: string
+}
+
+// Messages (v5 recent — used by POST /v5/messages/recent). A lighter, flatter shape than the v3
+// recent payload: `transcript` and `ai_summary` are direct string fields (no text_models), audio
+// lives in a single `audio` object, and — crucially — `ai_response_ids` lists the AI responses
+// generated for the message so we can pull them into notes. Scope is single-valued here
+// (`conversation_id` / `workspace_id`) where v3 used arrays.
+export interface CarbonVoiceTimecodeV5 {
+  t: string
+  s: number
+  e: number
+}
+
+export interface CarbonVoiceMessageRecentV5 {
+  id: string
+  type: MessageType | null
+  kind: MessageKind | null
+  created_at: string
+  updated_at: string
+  deleted_at: string | null
+  conversation_id: string | null
+  workspace_id: string | null
+  creator_id: string
+  status: string | null
+  parent_message_id: string | null
+  folder_id: string | null
+  // Not shown in the documented recent shape, but mapped through when the live payload carries it
+  // so named memos keep their title.
+  name?: string | null
+  language: string | null
+  available_languages: string[]
+  is_original_language: boolean
+  transcript: string | null
+  ai_summary: string | null
+  ai_response_ids: CarbonVoiceAiResponseRef[]
+  time_codes: CarbonVoiceTimecodeV5[]
+  audio: CarbonVoiceAudioInfo | null
+  attachments: CarbonVoiceAttachmentV5[]
+  conversation_sequence: number | null
+  source_message_id: string | null
+  link: string | null
+}
+
+// AI responses (GET /responses/{id}). A response holds one variant per language; each variant
+// may carry text / html / markdown / structured json renderings of the same answer.
+export interface CarbonVoiceAiResponseVariant {
+  language: string | null
+  json: Record<string, unknown> | null
+  text: string | null
+  html: string | null
+  markdown: string | null
+}
+
+export interface CarbonVoiceAiResponse {
+  id: string
+  creator_id: string
+  prompt_id: string
+  created_at: string
+  last_updated_at: string
+  responses: CarbonVoiceAiResponseVariant[]
+  message_ids: string[]
+  workspace_id: string
+  channel_id: string
+}
+
+// Prompts (GET /prompts). Used to turn a response's `prompt_id` into a human-readable heading
+// (e.g. "Action Items", "Summary") in the note.
+export interface CarbonVoicePrompt {
+  id: string
+  created_at: string
+  last_updated_at: string
+  creator_id: string
+  workspace_id: string
+  prompt: string
+  name: string
+  description: string
+  format_instructions: string
+  response_format: string
+  owner_type: string
+  category_number: number
+  order_in_category: number
 }
 
 // Channels (conversations)
@@ -248,6 +340,9 @@ export interface CarbonVoiceSettings {
   syncFolder: string
   syncInterval: number
   includeTranscripts: boolean
+  // Pull the AI responses attached to a message (per its ai_response_ids) into the note under an
+  // "AI Responses" section. When off, no /responses or /prompts calls are made.
+  includeAiResponses: boolean
   // Cross-link notes: generate People/Workspace stub notes and link participants, senders and
   // workspaces so the Obsidian graph and backlinks connect everything.
   linkNotes: boolean
@@ -284,6 +379,7 @@ export const DEFAULT_SETTINGS: CarbonVoiceSettings = {
   syncFolder: 'Carbon Voice',
   syncInterval: 15,
   includeTranscripts: true,
+  includeAiResponses: true,
   linkNotes: true,
   audioMode: 'off',
   syncOnStartup: true,

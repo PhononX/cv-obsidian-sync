@@ -36,6 +36,9 @@ into your Obsidian vault as Markdown notes.
   are created once and never overwritten, so you can annotate them freely.
 - **AI summaries** — a voice memo's Carbon Voice summary is written into a `## Summary`
   section at the top of its note.
+- **AI responses** — any AI responses attached to a message (summaries, action items and other
+  prompt outputs) are pulled in alongside it, each under a heading named for the prompt that
+  produced it. Toggle off with the **Include AI responses** setting.
 - **Audio playback in your notes** — listen right next to the transcript. Choose how:
   - _Embed player_ (default) — inline Carbon Voice player, nothing stored in your vault;
     private messages show their own locked state.
