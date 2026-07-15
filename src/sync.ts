@@ -12,11 +12,12 @@ import type {
 import { ASYNC_MEETING_PREFIX } from './types'
 import { formatTranscript } from './transcript-format'
 
-// One AI response rendered for a note: the prompt that produced it (used as a heading) and its
-// body as Markdown. Built by fetchAiResponses from a message's ai_response_ids.
+// A message's AI response, synced to its own note in the Artifacts folder. `promptName` is the
+// human label (the prompt that produced it); `linkTarget` is that note's vault path without
+// extension, so a message can wiki-link to it. Built by syncAiResponses from ai_response_ids.
 interface RenderedAiResponse {
   promptName: string
-  body: string
+  linkTarget: string
 }
 
 export interface SyncResult {
@@ -59,6 +60,24 @@ views:
       - message_count
       - last_message_at
       - conversation_link
+`
+
+// Ready-made "All AI Responses" Bases view, written at the sync root. Selects artifact notes by
+// their tag and lists them newest-first. `file.name` is the clickable column that opens the
+// artifact; open the backlinks pane on any artifact to see the messages that reference it.
+const ARTIFACTS_BASE = `filters:
+  and:
+    - file.hasTag("ai-response")
+views:
+  - type: table
+    name: All AI responses
+    order:
+      - file.name
+      - prompt_name
+      - date
+    sort:
+      - property: date
+        direction: DESC
 `
 
 // Ready-made "All Voice Memos" Bases view, written at the sync root. Selects voice-memo
@@ -279,7 +298,7 @@ export class CarbonVoiceSync {
       }
       const audioPath =
         this.settings.audioMode === 'download' ? await this.ensureAudio(api, m) : null
-      const aiResponses = await this.fetchAiResponses(api, m, promptNames, aiCache)
+      const aiResponses = await this.syncAiResponses(api, m, promptNames, aiCache)
       const basePath = `${this.root()}/Voice Memos/${subpath}/${sanitize(title)}.md`
       const path = await this.resolveMemoNotePath(basePath, m, claimed)
       await this.upsertFile(
@@ -427,7 +446,8 @@ export class CarbonVoiceSync {
     }
     if (aiResponses.length) {
       body.push('## AI Responses', '')
-      for (const r of aiResponses) body.push(`### ${r.promptName}`, r.body, '')
+      for (const r of aiResponses) body.push(`- 🤖 [[${r.linkTarget}|${r.promptName}]]`)
+      body.push('')
     }
     body.push(...this.audioBlock(m, audioPath))
 
@@ -507,7 +527,7 @@ export class CarbonVoiceSync {
             : new Map<string, string>()
         const aiResponses = new Map<string, RenderedAiResponse[]>()
         for (const m of msgs) {
-          const rendered = await this.fetchAiResponses(api, m, promptNames, aiCache)
+          const rendered = await this.syncAiResponses(api, m, promptNames, aiCache)
           if (rendered.length) aiResponses.set(m.message_id, rendered)
         }
         const path = `${folder}/${periodFileLabel(period, grouping)}`
@@ -602,8 +622,9 @@ export class CarbonVoiceSync {
           ''
         )
         body.push(...this.audioBlock(m, audioPaths.get(m.message_id) ?? null))
-        for (const r of aiResponses.get(m.message_id) ?? []) {
-          body.push(`**🤖 ${r.promptName}**`, '', r.body, '')
+        const arts = aiResponses.get(m.message_id) ?? []
+        if (arts.length) {
+          body.push(...arts.map(r => `- 🤖 [[${r.linkTarget}|${r.promptName}]]`), '')
         }
         // Precise UTC timestamp (searchable with ⌘-Shift-F, unlike the local heading) plus a
         // stable block id derived from the message id, so a single message can be deep-linked or
@@ -776,11 +797,13 @@ export class CarbonVoiceSync {
     }
   }
 
-  // Fetches and renders the AI responses referenced by a message (its ai_response_ids). Returns []
-  // when the feature is off or the message has none. Each id is fetched at most once per run via
-  // `cache` — a response can be attached to several messages. Failures are logged and skipped so a
-  // single bad response never aborts the sync.
-  private async fetchAiResponses(
+  // Fetches the AI responses referenced by a message (its ai_response_ids), writes each to its own
+  // note in the Artifacts folder, and returns link targets so the message can wiki-link to them.
+  // Returns [] when the feature is off or the message has none. Each id is fetched and written at
+  // most once per run via `cache` — a response can be attached to several messages, so a single
+  // artifact note ends up back-linked from every message that references it. Failures are logged
+  // and skipped so a single bad response never aborts the sync.
+  private async syncAiResponses(
     api: CarbonVoiceAPI,
     m: CarbonVoiceMessage,
     promptNames: Map<string, string>,
@@ -798,7 +821,9 @@ export class CarbonVoiceSync {
           if (body) {
             const name =
               promptNames.get(ref.prompt_id) || promptNames.get(resp.prompt_id) || 'AI Response'
-            rendered = { promptName: name, body }
+            const linkTarget = this.artifactBase(name, resp.id)
+            await this.upsertFile(`${linkTarget}.md`, this.buildArtifactNote(resp, name, body))
+            rendered = { promptName: name, linkTarget }
           }
         } catch (err) {
           console.warn(`Carbon Voice: could not fetch AI response ${ref.id}`, err)
@@ -808,6 +833,43 @@ export class CarbonVoiceSync {
       if (rendered) out.push(rendered)
     }
     return out
+  }
+
+  // Deterministic vault path (no extension) for a response's artifact note, so the writer and every
+  // linking message agree on it. Keyed by response id (short slug) for uniqueness, prefixed with the
+  // prompt name so the folder is human-browsable.
+  private artifactBase(promptName: string, responseId: string): string {
+    const short = responseId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || responseId
+    const leaf = sanitize(`${promptName} - ${short}`)
+    return normalizePath(`${this.root()}/Artifacts/${leaf}`)
+  }
+
+  // The note for one AI response: the rendered body plus links back to the source message(s). The
+  // reverse links (message → artifact) come from the message notes, so Obsidian's backlinks pane
+  // shows every referencing message here for free. Upserted (not create-if-absent) since a response
+  // can be regenerated — re-syncing refreshes the body in place.
+  private buildArtifactNote(
+    resp: CarbonVoiceAiResponse,
+    promptName: string,
+    body: string
+  ): string {
+    const created = resp.created_at ? resp.created_at.slice(0, 10) : ''
+    const fm = [
+      '---',
+      `cv_response_id: ${resp.id}`,
+      `cv_prompt_id: ${resp.prompt_id}`,
+      `prompt_name: ${yaml(promptName)}`,
+    ]
+    if (resp.channel_id) fm.push(`cv_conversation_id: ${resp.channel_id}`)
+    if (created) fm.push(`date: ${created}`)
+    fm.push('tags: [carbon-voice, ai-response]', '---', '')
+
+    const lines = [`# ${promptName}`, '', body, '', '## Source']
+    for (const id of resp.message_ids ?? []) {
+      lines.push(`- [Open message in Carbon Voice ↗](https://carbonvoice.app/m/${id})`)
+    }
+    lines.push(`- **Synced:** ${formatDateTime(new Date().toISOString())}`, '')
+    return fm.concat(lines).join('\n')
   }
 
   // ── Vault helpers ─────────────────────────────────────────────────────────
@@ -894,6 +956,9 @@ export class CarbonVoiceSync {
   private async ensureBaseViews(): Promise<void> {
     await this.createIfAbsent(`${this.root()}/Conversations by Date.base`, CONVERSATIONS_BASE)
     await this.createIfAbsent(`${this.root()}/All Voice Memos.base`, VOICE_MEMOS_BASE)
+    if (this.settings.includeAiResponses) {
+      await this.createIfAbsent(`${this.root()}/All AI Responses.base`, ARTIFACTS_BASE)
+    }
   }
 
   // Writes a conversation "home" note at the folder root: identity/metadata up top, an embedded
