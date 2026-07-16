@@ -12,18 +12,30 @@ import type {
 import { ASYNC_MEETING_PREFIX } from './types'
 import { formatTranscript } from './transcript-format'
 
-// A message's AI response, synced to its own note in the Artifacts folder. `promptName` is the
-// human label (the prompt that produced it); `linkTarget` is that note's vault path without
-// extension, so a message can wiki-link to it. Built by syncAiResponses from ai_response_ids.
+// An AI response synced to its own note in the Artifacts folder. `promptName` is the human label
+// (the prompt that produced it); `linkTarget` is that note's vault path without extension, so a
+// message can wiki-link to it. Built by writeArtifact from a response object.
 interface RenderedAiResponse {
   promptName: string
   linkTarget: string
+}
+
+// Shared state for the AI-response pass, built once per run. `promptNames` labels a response by its
+// prompt; `workspaces` names the workspace folder in an artifact's path; `index` maps a response id
+// to its written artifact (or null when it produced no note / failed) so message linking is a
+// lookup and each response is written at most once — whether reached via the /responses feed or an
+// individual fallback fetch.
+interface AiContext {
+  promptNames: Map<string, string>
+  workspaces: Map<string, string>
+  index: Map<string, RenderedAiResponse | null>
 }
 
 export interface SyncResult {
   firstRun: boolean
   conversations: number // conversation month-files written
   voiceMemos: number // voice memo notes written
+  artifacts: number // AI response notes written
 }
 
 // Live progress reported to the caller so a toast can show work as it happens. `fetching` covers
@@ -74,6 +86,7 @@ views:
     order:
       - file.name
       - prompt_name
+      - workspace_name
       - date
     sort:
       - property: date
@@ -127,7 +140,7 @@ export class CarbonVoiceSync {
     if (since == null) {
       this.settings.lastSyncTimestamp = startedAt
       await this.plugin.saveSettings()
-      return { firstRun: true, conversations: 0, voiceMemos: 0 }
+      return { firstRun: true, conversations: 0, voiceMemos: 0, artifacts: 0 }
     }
 
     const progress: SyncProgress = { phase: 'fetching', fetched: 0, conversations: 0, voiceMemos: 0 }
@@ -138,20 +151,21 @@ export class CarbonVoiceSync {
     progress.phase = 'writing'
     const memos = messages.filter(m => this.isVoiceMemo(m) && this.memoInScope(m))
     const convMsgs = await this.selectConversationMessages(api, messages)
-    const promptNames = await this.fetchPromptNames(api)
 
-    const voiceMemos = await this.processVoiceMemos(api, memos, promptNames, () => {
+    const ai = await this.buildAiContext(api)
+    const artifacts = await this.syncResponses(api, since, ai)
+    const voiceMemos = await this.processVoiceMemos(api, memos, ai, () => {
       progress.voiceMemos++
       onProgress?.(progress)
     })
-    const conversations = await this.processConversations(api, convMsgs, promptNames, () => {
+    const conversations = await this.processConversations(api, convMsgs, ai, () => {
       progress.conversations++
       onProgress?.(progress)
     })
 
     this.settings.lastSyncTimestamp = startedAt
     await this.plugin.saveSettings()
-    return { firstRun: false, conversations, voiceMemos }
+    return { firstRun: false, conversations, voiceMemos, artifacts }
   }
 
   // Explicit historical pull for BOTH categories in a single fetch — the recents endpoint
@@ -174,24 +188,26 @@ export class CarbonVoiceSync {
       onProgress?.(progress)
     })
     progress.phase = 'writing'
-    const promptNames = await this.fetchPromptNames(api)
+
+    const ai = await this.buildAiContext(api)
+    const artifacts = await this.syncResponses(api, earliest, ai)
 
     const memoMsgs = messages.filter(
       m => m.created_at >= memoSince && this.isVoiceMemo(m) && this.memoInScope(m)
     )
-    const voiceMemos = await this.processVoiceMemos(api, memoMsgs, promptNames, () => {
+    const voiceMemos = await this.processVoiceMemos(api, memoMsgs, ai, () => {
       progress.voiceMemos++
       onProgress?.(progress)
     })
 
     const convCandidates = messages.filter(m => m.created_at >= convSince)
     const convMsgs = await this.selectConversationMessages(api, convCandidates)
-    const conversations = await this.processConversations(api, convMsgs, promptNames, () => {
+    const conversations = await this.processConversations(api, convMsgs, ai, () => {
       progress.conversations++
       onProgress?.(progress)
     })
 
-    return { firstRun: false, conversations, voiceMemos }
+    return { firstRun: false, conversations, voiceMemos, artifacts }
   }
 
   // ── Message fetching ────────────────────────────────────────────────────
@@ -269,21 +285,19 @@ export class CarbonVoiceSync {
   private async processVoiceMemos(
     api: CarbonVoiceAPI,
     memos: CarbonVoiceMessage[],
-    promptNames: Map<string, string>,
+    ai: AiContext,
     onTick?: () => void
   ): Promise<number> {
     const live = memos.filter(m => !m.deleted_at && !isPending(m))
     if (live.length === 0) return 0
 
     const folders = await this.fetchFolders(api)
-    const workspaces = await this.fetchWorkspaceNames(api)
+    const workspaces = ai.workspaces
 
     let count = 0
     // Tracks the note path each memo claimed this run, so two same-titled memos in one import
     // don't fight over one file — the second is disambiguated instead of overwriting the first.
     const claimed = new Map<string, string>()
-    // Dedupes /responses fetches across memos that share an AI response.
-    const aiCache = new Map<string, RenderedAiResponse | null>()
     for (const m of live) {
       const transcript = messageTranscript(m)
       const summary = extractText(m, 'summary')
@@ -298,7 +312,7 @@ export class CarbonVoiceSync {
       }
       const audioPath =
         this.settings.audioMode === 'download' ? await this.ensureAudio(api, m) : null
-      const aiResponses = await this.syncAiResponses(api, m, promptNames, aiCache)
+      const aiResponses = await this.resolveAiLinks(api, m, ai)
       const basePath = `${this.root()}/Voice Memos/${subpath}/${sanitize(title)}.md`
       const path = await this.resolveMemoNotePath(basePath, m, claimed)
       await this.upsertFile(
@@ -469,13 +483,11 @@ export class CarbonVoiceSync {
   private async processConversations(
     api: CarbonVoiceAPI,
     convMsgs: CarbonVoiceMessage[],
-    promptNames: Map<string, string>,
+    ai: AiContext,
     onTick?: () => void
   ): Promise<number> {
     const live = convMsgs.filter(m => !m.deleted_at && !isPending(m))
     const grouping = this.settings.messageGrouping
-    // Dedupes /responses fetches across the run's messages/periods.
-    const aiCache = new Map<string, RenderedAiResponse | null>()
     // Which (channel, period) files were touched? A period is a month, week, or day per the setting.
     const touched = new Map<string, Set<string>>()
     for (const m of live) {
@@ -527,7 +539,7 @@ export class CarbonVoiceSync {
             : new Map<string, string>()
         const aiResponses = new Map<string, RenderedAiResponse[]>()
         for (const m of msgs) {
-          const rendered = await this.syncAiResponses(api, m, promptNames, aiCache)
+          const rendered = await this.resolveAiLinks(api, m, ai)
           if (rendered.length) aiResponses.set(m.message_id, rendered)
         }
         const path = `${folder}/${periodFileLabel(period, grouping)}`
@@ -781,67 +793,116 @@ export class CarbonVoiceSync {
 
   // ── AI responses ───────────────────────────────────────────────────────────
 
-  // prompt_id → display name, so a response can be headed by the prompt that produced it
-  // (e.g. "Action Items"). Fetched once per run. Empty when AI responses are disabled or the
-  // call fails — responses then fall back to a generic "AI Response" heading.
-  private async fetchPromptNames(api: CarbonVoiceAPI): Promise<Map<string, string>> {
-    if (!this.settings.includeAiResponses) return new Map()
-    try {
-      const prompts = await api.getPrompts()
-      const map = new Map<string, string>()
-      for (const p of prompts) if (p.id) map.set(p.id, p.name?.trim() || p.id)
-      return map
-    } catch (err) {
-      console.warn('Carbon Voice: could not fetch prompt names', err)
-      return new Map()
+  // Builds the run's AI-response context: prompt names (for labelling/paths) and the workspace-name
+  // map (for artifact paths), plus an empty index the response passes fill in. Both lookups are
+  // skipped when AI responses are disabled, so no /prompts call is made.
+  private async buildAiContext(api: CarbonVoiceAPI): Promise<AiContext> {
+    const workspaces = await this.fetchWorkspaceNames(api)
+    const promptNames = new Map<string, string>()
+    if (this.settings.includeAiResponses) {
+      try {
+        for (const p of await api.getPrompts()) if (p.id) promptNames.set(p.id, p.name?.trim() || p.id)
+      } catch (err) {
+        // Non-fatal: responses still sync, just under a generic "AI Response" label.
+        console.warn('Carbon Voice: could not fetch prompt names', err)
+      }
     }
+    return { promptNames, workspaces, index: new Map() }
   }
 
-  // Fetches the AI responses referenced by a message (its ai_response_ids), writes each to its own
-  // note in the Artifacts folder, and returns link targets so the message can wiki-link to them.
-  // Returns [] when the feature is off or the message has none. Each id is fetched and written at
-  // most once per run via `cache` — a response can be attached to several messages, so a single
-  // artifact note ends up back-linked from every message that references it. Failures are logged
-  // and skipped so a single bad response never aborts the sync.
-  private async syncAiResponses(
+  // Syncs AI responses directly from the /responses feed, paging forward from `sinceIso` and
+  // writing each to its own artifact note. This is the primary artifact sync: it captures responses
+  // even for messages outside the synced scope, and populates `ai.index` so message linking is a
+  // lookup rather than a per-message fetch. Returns the number of artifact notes written.
+  private async syncResponses(api: CarbonVoiceAPI, sinceIso: string, ai: AiContext): Promise<number> {
+    if (!this.settings.includeAiResponses) return 0
+    let written = 0
+    let cursor = sinceIso
+    for (let i = 0; i < MAX_PAGES; i++) {
+      let page
+      try {
+        page = await api.getResponses({ date: cursor, direction: 'newer', limit: PAGE })
+      } catch (err) {
+        // The feed endpoint is unavailable — stop the pass. Message-referenced responses still get
+        // picked up individually by resolveAiLinks' fallback.
+        console.warn('Carbon Voice: could not fetch AI responses feed', err)
+        break
+      }
+      if (page.length === 0) break
+      let newest = cursor
+      for (const resp of page) {
+        if (!ai.index.has(resp.id) && (await this.writeArtifact(resp, ai))) written++
+        // Advance by created_at — the feed's `date` orders by creation, like the message scans.
+        if (resp.created_at > newest) newest = resp.created_at
+      }
+      // A short page is not end-of-data (the endpoint may cap page size); stop only when a page is
+      // empty or the cursor can't move forward.
+      if (newest === cursor) break
+      cursor = newest
+    }
+    return written
+  }
+
+  // Resolves a message's ai_response_ids to artifact links. Feed-synced responses are already in
+  // `ai.index`; anything missing (e.g. a response created outside this run's window) is fetched
+  // individually and written on demand, so an in-scope message never loses its link. Each id is
+  // resolved at most once per run. Failures are logged and skipped.
+  private async resolveAiLinks(
     api: CarbonVoiceAPI,
     m: CarbonVoiceMessage,
-    promptNames: Map<string, string>,
-    cache: Map<string, RenderedAiResponse | null>
+    ai: AiContext
   ): Promise<RenderedAiResponse[]> {
     if (!this.settings.includeAiResponses) return []
     const out: RenderedAiResponse[] = []
     for (const ref of m.ai_response_ids ?? []) {
-      let rendered = cache.get(ref.id)
-      if (rendered === undefined) {
-        rendered = null
+      if (!ai.index.has(ref.id)) {
         try {
-          const resp = await api.getResponse(ref.id)
-          const body = renderAiResponseBody(resp)
-          if (body) {
-            const name =
-              promptNames.get(ref.prompt_id) || promptNames.get(resp.prompt_id) || 'AI Response'
-            const linkTarget = this.artifactBase(name, resp.id)
-            await this.upsertFile(`${linkTarget}.md`, this.buildArtifactNote(resp, name, body))
-            rendered = { promptName: name, linkTarget }
-          }
+          await this.writeArtifact(await api.getResponse(ref.id), ai)
         } catch (err) {
           console.warn(`Carbon Voice: could not fetch AI response ${ref.id}`, err)
+          ai.index.set(ref.id, null)
         }
-        cache.set(ref.id, rendered)
       }
-      if (rendered) out.push(rendered)
+      const hit = ai.index.get(ref.id)
+      if (hit) out.push(hit)
     }
     return out
   }
 
-  // Deterministic vault path (no extension) for a response's artifact note, so the writer and every
-  // linking message agree on it. Keyed by response id (short slug) for uniqueness, prefixed with the
-  // prompt name so the folder is human-browsable.
-  private artifactBase(promptName: string, responseId: string): string {
-    const short = responseId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || responseId
-    const leaf = sanitize(`${promptName} - ${short}`)
-    return normalizePath(`${this.root()}/Artifacts/${leaf}`)
+  // Writes one response's artifact note (upserted, since a response can be regenerated) and records
+  // it in `ai.index`. Records null — so it's never retried — when the response renders no body.
+  // Returns true when a note was written.
+  private async writeArtifact(resp: CarbonVoiceAiResponse, ai: AiContext): Promise<boolean> {
+    const body = renderAiResponseBody(resp)
+    if (!body) {
+      ai.index.set(resp.id, null)
+      return false
+    }
+    const promptName = ai.promptNames.get(resp.prompt_id) || 'AI Response'
+    const wsName = (resp.workspace_id && ai.workspaces.get(resp.workspace_id)) || ''
+    const linkTarget = this.artifactBase(resp, promptName, wsName)
+    await this.upsertFile(`${linkTarget}.md`, this.buildArtifactNote(resp, promptName, wsName, body))
+    ai.index.set(resp.id, { promptName, linkTarget })
+    return true
+  }
+
+  // Deterministic vault path (no extension) for a response's artifact note, so the feed pass, the
+  // fallback fetch, and every linking message all agree on it:
+  //   Artifacts/<workspace>/<prompt name>/<channel_id>/<truncated response> (<short id>)
+  // The response id keeps the leaf unique; the folders make the store browsable by workspace,
+  // prompt and conversation.
+  private artifactBase(resp: CarbonVoiceAiResponse, promptName: string, wsName: string): string {
+    const short = resp.id.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || resp.id
+    const leaf = sanitize(`${truncateTitle(aiResponseTitle(resp)) || 'Response'} (${short})`)
+    const parts = [
+      this.root(),
+      'Artifacts',
+      sanitize(wsName || 'Unfiled'),
+      sanitize(promptName),
+      sanitize(resp.channel_id || 'Unfiled'),
+      leaf,
+    ]
+    return normalizePath(parts.join('/'))
   }
 
   // The note for one AI response: the rendered body plus links back to the source message(s). The
@@ -851,6 +912,7 @@ export class CarbonVoiceSync {
   private buildArtifactNote(
     resp: CarbonVoiceAiResponse,
     promptName: string,
+    wsName: string,
     body: string
   ): string {
     const created = resp.created_at ? resp.created_at.slice(0, 10) : ''
@@ -860,6 +922,7 @@ export class CarbonVoiceSync {
       `cv_prompt_id: ${resp.prompt_id}`,
       `prompt_name: ${yaml(promptName)}`,
     ]
+    if (wsName) fm.push(`workspace_name: ${yaml(wsName)}`)
     if (resp.channel_id) fm.push(`cv_conversation_id: ${resp.channel_id}`)
     if (created) fm.push(`date: ${created}`)
     fm.push('tags: [carbon-voice, ai-response]', '---', '')
@@ -1187,6 +1250,22 @@ function renderAiResponseBody(resp: CarbonVoiceAiResponse): string | null {
     }
   }
   return null
+}
+
+// Plain-text lead of a response, used to build a human-readable artifact filename. Prefers the
+// text/markdown of the first variant that has content; falls back to the values of a structured
+// (json) response. Empty when nothing renders — the caller then names the file "Response".
+function aiResponseTitle(resp: CarbonVoiceAiResponse): string {
+  for (const v of resp.responses ?? []) {
+    const t = (v.text || v.markdown)?.trim()
+    if (t) return t
+    if (v.json && Object.keys(v.json).length) {
+      return Object.values(v.json)
+        .map(x => String(x))
+        .join(' ')
+    }
+  }
+  return ''
 }
 
 function workspaceName(c: CarbonVoiceChannel): string {

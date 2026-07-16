@@ -2,7 +2,7 @@ import { Notice, Plugin, WorkspaceLeaf } from 'obsidian'
 import { CarbonVoiceSettings, DEFAULT_SETTINGS } from './types'
 import { CarbonVoiceSettingTab } from './settings'
 import { CarbonVoiceSync } from './sync'
-import type { SyncProgress } from './sync'
+import type { SyncProgress, SyncResult } from './sync'
 import { CarbonVoiceView, CARBON_VOICE_VIEW } from './view'
 
 export default class CarbonVoiceSyncPlugin extends Plugin {
@@ -68,9 +68,7 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
           'Carbon Voice: Connected. New activity syncs from now — use Import history for past data.'
         )
       } else {
-        new Notice(
-          `Carbon Voice: Synced ${res.conversations} conversation file(s), ${res.voiceMemos} voice memo(s)`
-        )
+        new Notice(`Carbon Voice: Synced ${summarizeResult(res)}`)
       }
     } catch (err) {
       notice.hide()
@@ -100,9 +98,7 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
         p => notice.setMessage(progressMessage('Carbon Voice: Importing…', p))
       )
       notice.hide()
-      new Notice(
-        `Carbon Voice: Imported ${res.conversations} conversation file(s), ${res.voiceMemos} voice memo(s)`
-      )
+      new Notice(`Carbon Voice: Imported ${summarizeResult(res)}`)
     } catch (err) {
       notice.hide()
       new Notice(`Carbon Voice: Import failed — ${errMessage(err)}`)
@@ -186,6 +182,17 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : 'unknown error'
+}
+
+// Result summary for a sync/import notice. AI responses are only mentioned when some were written,
+// so the message stays short for users who have the feature off or have no responses.
+function summarizeResult(res: SyncResult): string {
+  const parts = [
+    `${res.conversations} conversation file(s)`,
+    `${res.voiceMemos} voice memo(s)`,
+  ]
+  if (res.artifacts > 0) parts.push(`${res.artifacts} AI response(s)`)
+  return parts.join(', ')
 }
 
 // Toast text for a live sync/import. During the fetch phase we can only show how many messages

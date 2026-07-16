@@ -42,6 +42,12 @@ export interface GetMessageOptions {
   fresh?: boolean
 }
 
+export interface ResponsesQueryParams {
+  date: string
+  direction: MessageDirection
+  limit?: number
+}
+
 export interface WorkspaceQueryParams {
   direction?: MessageDirection
   limit?: number
@@ -170,7 +176,17 @@ export class CarbonVoiceAPI {
 
   // ── AI responses & prompts ────────────────────────────────────────────────
 
-  // The AI responses generated for a message (one call per id from a message's ai_response_ids).
+  // A page of AI responses across the account, ordered by date — the feed used to sync artifacts
+  // in bulk. Paged like the message scans (date cursor + direction).
+  async getResponses(params: ResponsesQueryParams): Promise<CarbonVoiceAiResponse[]> {
+    const qs = new URLSearchParams()
+    qs.set('date', params.date)
+    qs.set('direction', params.direction)
+    if (params.limit != null) qs.set('limit', String(params.limit))
+    return this.get<CarbonVoiceAiResponse[]>(`/responses?${qs.toString()}`)
+  }
+
+  // A single AI response by id (fallback for a message-referenced response not in the feed window).
   async getResponse(id: string): Promise<CarbonVoiceAiResponse> {
     return this.get<CarbonVoiceAiResponse>(`/responses/${id}`)
   }
