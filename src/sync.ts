@@ -24,11 +24,15 @@ interface RenderedAiResponse {
 // prompt; `workspaces` names the workspace folder in an artifact's path; `index` maps a response id
 // to its written artifact (or null when it produced no note / failed) so message linking is a
 // lookup and each response is written at most once — whether reached via the /responses feed or an
-// individual fallback fetch.
+// individual fallback fetch. `channelNames` caches a channel_id's display name (one getChannel per
+// channel), and `claimedChannels` tracks which channel owns each artifact channel-folder so two
+// same-named conversations don't share one folder — mirroring the Conversations tree.
 interface AiContext {
   promptNames: Map<string, string>
   workspaces: Map<string, string>
   index: Map<string, RenderedAiResponse | null>
+  channelNames: Map<string, string>
+  claimedChannels: Map<string, string>
 }
 
 export interface SyncResult {
@@ -807,7 +811,13 @@ export class CarbonVoiceSync {
         console.warn('Carbon Voice: could not fetch prompt names', err)
       }
     }
-    return { promptNames, workspaces, index: new Map() }
+    return {
+      promptNames,
+      workspaces,
+      index: new Map(),
+      channelNames: new Map(),
+      claimedChannels: new Map(),
+    }
   }
 
   // Syncs AI responses directly from the /responses feed, paging forward from `sinceIso` and
@@ -831,7 +841,7 @@ export class CarbonVoiceSync {
       if (page.length === 0) break
       let newest = cursor
       for (const resp of page) {
-        if (!ai.index.has(resp.id) && (await this.writeArtifact(resp, ai))) written++
+        if (!ai.index.has(resp.id) && (await this.writeArtifact(api, resp, ai))) written++
         // Advance by created_at — the feed's `date` orders by creation, like the message scans.
         if (resp.created_at > newest) newest = resp.created_at
       }
@@ -857,7 +867,7 @@ export class CarbonVoiceSync {
     for (const ref of m.ai_response_ids ?? []) {
       if (!ai.index.has(ref.id)) {
         try {
-          await this.writeArtifact(await api.getResponse(ref.id), ai)
+          await this.writeArtifact(api, await api.getResponse(ref.id), ai)
         } catch (err) {
           console.warn(`Carbon Voice: could not fetch AI response ${ref.id}`, err)
           ai.index.set(ref.id, null)
@@ -871,8 +881,14 @@ export class CarbonVoiceSync {
 
   // Writes one response's artifact note (upserted, since a response can be regenerated) and records
   // it in `ai.index`. Records null — so it's never retried — when the response renders no body.
-  // Returns true when a note was written.
-  private async writeArtifact(resp: CarbonVoiceAiResponse, ai: AiContext): Promise<boolean> {
+  // Returns true when a note was written. The note path is
+  //   Artifacts/<workspace>/<prompt name>/<conversation>/<truncated response> (<short id>).md
+  // browsable by workspace, prompt and conversation; the response id keeps each leaf unique.
+  private async writeArtifact(
+    api: CarbonVoiceAPI,
+    resp: CarbonVoiceAiResponse,
+    ai: AiContext
+  ): Promise<boolean> {
     const body = renderAiResponseBody(resp)
     if (!body) {
       ai.index.set(resp.id, null)
@@ -880,29 +896,59 @@ export class CarbonVoiceSync {
     }
     const promptName = ai.promptNames.get(resp.prompt_id) || 'AI Response'
     const wsName = (resp.workspace_id && ai.workspaces.get(resp.workspace_id)) || ''
-    const linkTarget = this.artifactBase(resp, promptName, wsName)
+    const parentBase = normalizePath(
+      `${this.root()}/Artifacts/${sanitize(wsName || 'Unfiled')}/${sanitize(promptName)}`
+    )
+    const channelFolder = await this.resolveArtifactChannelFolder(api, parentBase, resp.channel_id, ai)
+    const short = resp.id.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || resp.id
+    const leaf = sanitize(`${truncateTitle(aiResponseTitle(resp)) || 'Response'} (${short})`)
+    const linkTarget = normalizePath(`${channelFolder}/${leaf}`)
     await this.upsertFile(`${linkTarget}.md`, this.buildArtifactNote(resp, promptName, wsName, body))
     ai.index.set(resp.id, { promptName, linkTarget })
     return true
   }
 
-  // Deterministic vault path (no extension) for a response's artifact note, so the feed pass, the
-  // fallback fetch, and every linking message all agree on it:
-  //   Artifacts/<workspace>/<prompt name>/<channel_id>/<truncated response> (<short id>)
-  // The response id keeps the leaf unique; the folders make the store browsable by workspace,
-  // prompt and conversation.
-  private artifactBase(resp: CarbonVoiceAiResponse, promptName: string, wsName: string): string {
-    const short = resp.id.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || resp.id
-    const leaf = sanitize(`${truncateTitle(aiResponseTitle(resp)) || 'Response'} (${short})`)
-    const parts = [
-      this.root(),
-      'Artifacts',
-      sanitize(wsName || 'Unfiled'),
-      sanitize(promptName),
-      sanitize(resp.channel_id || 'Unfiled'),
-      leaf,
-    ]
-    return normalizePath(parts.join('/'))
+  // The conversation folder for a response's artifacts, using the channel's display name (not its
+  // id). Mirrors resolveChannelFolder: a channel keeps its clean name unless a *different* channel
+  // already owns that folder — on disk (via the artifact notes' cv_conversation_id) or claimed
+  // earlier this run — in which case a short channel-id tag is appended so two same-named
+  // conversations never share a folder. Responses with no channel (e.g. voice memos) go under
+  // "Unfiled".
+  private async resolveArtifactChannelFolder(
+    api: CarbonVoiceAPI,
+    parentBase: string,
+    channelId: string | null,
+    ai: AiContext
+  ): Promise<string> {
+    if (!channelId) return normalizePath(`${parentBase}/Unfiled`)
+    const base = normalizePath(`${parentBase}/${sanitize(await this.artifactChannelName(api, channelId, ai))}`)
+    const owner = ai.claimedChannels.get(base) ?? (await this.channelIdAt(base))
+    let chosen = base
+    if (owner != null && owner !== channelId) {
+      chosen = normalizePath(`${base} (${channelId.slice(0, 8)})`)
+    }
+    ai.claimedChannels.set(chosen, channelId)
+    return chosen
+  }
+
+  // A channel's display name for artifact paths, fetched once per run (cache-first). Falls back to
+  // the raw channel id if the channel can't be fetched (e.g. deleted → 403), so distinct channels
+  // still get distinct folders.
+  private async artifactChannelName(
+    api: CarbonVoiceAPI,
+    channelId: string,
+    ai: AiContext
+  ): Promise<string> {
+    const cached = ai.channelNames.get(channelId)
+    if (cached !== undefined) return cached
+    let name = channelId
+    try {
+      name = channelName(await api.getChannel(channelId))
+    } catch (err) {
+      console.warn(`Carbon Voice: could not fetch channel ${channelId} for artifact path`, err)
+    }
+    ai.channelNames.set(channelId, name)
+    return name
   }
 
   // The note for one AI response: the rendered body plus links back to the source message(s). The
