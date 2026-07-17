@@ -750,6 +750,34 @@ export class CarbonVoiceSync {
     }
   }
 
+  // Whether a response from the /responses feed is in the conversation sync scope — the single-
+  // valued analogue of convInScope + matchesAsyncRule, working off a response's workspace_id /
+  // channel_id. The bulk feed pass uses this so it only writes artifacts for conversations and
+  // workspaces the user is syncing. (A response referenced by an in-scope message that this misses
+  // — e.g. a voice memo's response, or one outside the window — is still written by resolveAiLinks'
+  // per-message fallback, so nothing in scope loses its artifact.)
+  private responseInConvScope(resp: CarbonVoiceAiResponse): boolean {
+    const s = this.settings
+    switch (s.conversationScope) {
+      case 'by_workspace':
+        return !!resp.workspace_id && s.conversationWorkspaceIds.includes(resp.workspace_id)
+      case 'by_conversation': {
+        if (resp.channel_id && s.conversationIds.includes(resp.channel_id)) return true
+        // Honour "all async meetings in <workspace>" rules, like matchesAsyncRule.
+        const asyncWs = this.asyncRuleWorkspaceIds()
+        return (
+          asyncWs.size > 0 &&
+          !!resp.workspace_id &&
+          asyncWs.has(resp.workspace_id) &&
+          !!resp.channel_id &&
+          s.channelTypeCache[resp.channel_id] === 'asyncMeeting'
+        )
+      }
+      default:
+        return true
+    }
+  }
+
   private memoInScope(m: CarbonVoiceMessage): boolean {
     const s = this.settings
     switch (s.voiceMemoScope) {
@@ -841,7 +869,12 @@ export class CarbonVoiceSync {
       if (page.length === 0) break
       let newest = cursor
       for (const resp of page) {
-        if (!ai.index.has(resp.id) && (await this.writeArtifact(api, resp, ai))) written++
+        if (
+          !ai.index.has(resp.id) &&
+          this.responseInConvScope(resp) &&
+          (await this.writeArtifact(api, resp, ai))
+        )
+          written++
         // Advance by created_at — the feed's `date` orders by creation, like the message scans.
         if (resp.created_at > newest) newest = resp.created_at
       }
