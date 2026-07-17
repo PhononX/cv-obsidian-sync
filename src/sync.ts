@@ -464,7 +464,7 @@ export class CarbonVoiceSync {
     }
     if (aiResponses.length) {
       body.push('## AI Responses', '')
-      for (const r of aiResponses) body.push(`- 🤖 [[${r.linkTarget}|${r.promptName}]]`)
+      for (const r of aiResponses) body.push(`- 🤖 ${artifactLink(r.linkTarget, r.promptName)}`)
       body.push('')
     }
     body.push(...this.audioBlock(m, audioPath))
@@ -640,7 +640,8 @@ export class CarbonVoiceSync {
         body.push(...this.audioBlock(m, audioPaths.get(m.message_id) ?? null))
         const arts = aiResponses.get(m.message_id) ?? []
         if (arts.length) {
-          body.push(...arts.map(r => `- 🤖 [[${r.linkTarget}|${r.promptName}]]`), '')
+          body.push('**AI responses**', '')
+          body.push(...arts.map(r => `- 🤖 ${artifactLink(r.linkTarget, r.promptName)}`), '')
         }
         // Precise UTC timestamp (searchable with ⌘-Shift-F, unlike the local heading) plus a
         // stable block id derived from the message id, so a single message can be deep-linked or
@@ -995,6 +996,7 @@ export class CarbonVoiceSync {
     body: string
   ): string {
     const created = resp.created_at ? resp.created_at.slice(0, 10) : ''
+    const messageIds = resp.message_ids ?? []
     const fm = [
       '---',
       `cv_response_id: ${resp.id}`,
@@ -1002,13 +1004,20 @@ export class CarbonVoiceSync {
       `prompt_name: ${yaml(promptName)}`,
     ]
     if (wsName) fm.push(`workspace_name: ${yaml(wsName)}`)
+    if (resp.workspace_id) fm.push(`workspace_id: ${resp.workspace_id}`)
     if (resp.channel_id) fm.push(`cv_conversation_id: ${resp.channel_id}`)
+    // Source message ids: a plural list (a response can span several messages) plus a singular
+    // `cv_message_id` for the common one-message case, so the artifact is queryable from either.
+    if (messageIds.length) {
+      fm.push(`cv_message_id: ${messageIds[0]}`)
+      fm.push(`message_ids: [${messageIds.map(id => yaml(id)).join(', ')}]`)
+    }
     if (created) fm.push(`date: ${created}`)
     fm.push('tags: [carbon-voice, ai-response]', '---', '')
 
     const lines = [`# ${promptName}`, '', body, '', '## Source']
-    for (const id of resp.message_ids ?? []) {
-      lines.push(`- [Open message in Carbon Voice ↗](https://carbonvoice.app/m/${id})`)
+    for (const id of messageIds) {
+      lines.push(`- \`${id}\` — [Open in Carbon Voice ↗](https://carbonvoice.app/m/${id})`)
     }
     lines.push(`- **Synced:** ${formatDateTime(new Date().toISOString())}`, '')
     return fm.concat(lines).join('\n')
@@ -1312,6 +1321,14 @@ export class CarbonVoiceSync {
 
 function channelName(c: CarbonVoiceChannel): string {
   return c.channel_name?.trim() || `Conversation ${c.channel_guid.slice(0, 8)}`
+}
+
+// A wiki-link `[[target|alias]]` to an artifact. The alias is stripped of the `[`, `]` and `|`
+// characters that would otherwise terminate the link early — a prompt name like "Q | A" must not
+// break the message → artifact cross-link. The target path is already sanitized of those.
+function artifactLink(target: string, alias: string): string {
+  const safeAlias = alias.replace(/[[\]|]/g, ' ').replace(/\s+/g, ' ').trim() || 'AI response'
+  return `[[${target}|${safeAlias}]]`
 }
 
 // The Markdown body for one AI response. A response holds a variant per language; we take the
