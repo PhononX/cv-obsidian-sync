@@ -24,13 +24,17 @@ interface RenderedAiResponse {
 // prompt; `workspaces` names the workspace folder in an artifact's path; `index` maps a response id
 // to its written artifact (or null when it produced no note / failed) so message linking is a
 // lookup and each response is written at most once — whether reached via the /responses feed or an
-// individual fallback fetch. `channelNames` caches a channel_id's display name (one getChannel per
-// channel), and `claimedChannels` tracks which channel owns each artifact channel-folder so two
-// same-named conversations don't share one folder — mirroring the Conversations tree.
+// individual fallback fetch. `byMessage` maps a source message id to the response ids attributed to
+// it (from each response's message_ids) — this is how a message finds its artifacts without relying
+// on the v5 message payload's ai_response_ids, so linking works on the v3 endpoint. `channelNames`
+// caches a channel_id's display name (one getChannel per channel), and `claimedChannels` tracks
+// which channel owns each artifact channel-folder so two same-named conversations don't share one
+// folder — mirroring the Conversations tree.
 interface AiContext {
   promptNames: Map<string, string>
   workspaces: Map<string, string>
   index: Map<string, RenderedAiResponse | null>
+  byMessage: Map<string, Set<string>>
   channelNames: Map<string, string>
   claimedChannels: Map<string, string>
 }
@@ -844,6 +848,7 @@ export class CarbonVoiceSync {
       promptNames,
       workspaces,
       index: new Map(),
+      byMessage: new Map(),
       channelNames: new Map(),
       claimedChannels: new Map(),
     }
@@ -887,17 +892,18 @@ export class CarbonVoiceSync {
     return written
   }
 
-  // Resolves a message's ai_response_ids to artifact links. Feed-synced responses are already in
-  // `ai.index`; anything missing (e.g. a response created outside this run's window) is fetched
-  // individually and written on demand, so an in-scope message never loses its link. Each id is
-  // resolved at most once per run. Failures are logged and skipped.
+  // Resolves the artifact links for a message. The primary source is `ai.byMessage` — the response
+  // ids the /responses feed attributed to this message via their message_ids — which needs nothing
+  // from the message payload, so it works on the v3 endpoint. As a secondary source (only populated
+  // once sync returns to v5) a message's own ai_response_ids are honoured too, fetching any the feed
+  // didn't cover. Ids are de-duplicated; failures are logged and skipped.
   private async resolveAiLinks(
     api: CarbonVoiceAPI,
     m: CarbonVoiceMessage,
     ai: AiContext
   ): Promise<RenderedAiResponse[]> {
     if (!this.settings.includeAiResponses) return []
-    const out: RenderedAiResponse[] = []
+    const ids = new Set<string>(ai.byMessage.get(m.message_id) ?? [])
     for (const ref of m.ai_response_ids ?? []) {
       if (!ai.index.has(ref.id)) {
         try {
@@ -907,7 +913,11 @@ export class CarbonVoiceSync {
           ai.index.set(ref.id, null)
         }
       }
-      const hit = ai.index.get(ref.id)
+      ids.add(ref.id)
+    }
+    const out: RenderedAiResponse[] = []
+    for (const id of ids) {
+      const hit = ai.index.get(id)
       if (hit) out.push(hit)
     }
     return out
@@ -939,6 +949,13 @@ export class CarbonVoiceSync {
     const linkTarget = normalizePath(`${channelFolder}/${leaf}`)
     await this.upsertFile(`${linkTarget}.md`, this.buildArtifactNote(resp, promptName, wsName, body))
     ai.index.set(resp.id, { promptName, linkTarget })
+    // Attribute this response to each of its source messages so those messages can link to it
+    // without the v5 payload's ai_response_ids.
+    for (const mid of resp.message_ids ?? []) {
+      const set = ai.byMessage.get(mid) ?? new Set<string>()
+      set.add(resp.id)
+      ai.byMessage.set(mid, set)
+    }
     return true
   }
 

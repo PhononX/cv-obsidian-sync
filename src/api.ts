@@ -155,13 +155,17 @@ export class CarbonVoiceAPI {
 
   // Returns messages across all channels (or one channel via channel_id).
   // Voice memos have type === 'voicememo' and a folder_id.
-  //
-  // Backed by POST /v5/messages/recent — a lighter payload than the old v3 endpoint that also
-  // reports each message's AI responses (ai_response_ids). The v5 shape differs (single-valued
-  // conversation_id/workspace_id, direct transcript/ai_summary, a single audio object), so we
-  // normalise every row back into the CarbonVoiceMessage the sync engine consumes; the mapped
-  // message additionally carries `ai_response_ids`.
   async getRecentMessages(params: MessageQueryParams): Promise<CarbonVoiceMessage[]> {
+    return this.post<CarbonVoiceMessage[]>('/v3/messages/recent', params)
+  }
+
+  // POST /v5/messages/recent — a lighter payload than v3 that also reports each message's AI
+  // responses (ai_response_ids). NOT yet wired into sync: the v5 endpoint isn't ready for public
+  // use, so getRecentMessages above stays on v3. Kept (with mapRecentV5ToMessage) so the switch is
+  // a one-line change when v5 ships. The v5 shape differs (single-valued conversation_id /
+  // workspace_id, direct transcript / ai_summary, a single audio object), so every row is
+  // normalised back into the CarbonVoiceMessage the sync engine consumes.
+  async getRecentMessagesV5(params: MessageQueryParams): Promise<CarbonVoiceMessage[]> {
     const body = {
       date: params.date,
       direction: params.direction,

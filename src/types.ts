@@ -109,8 +109,10 @@ export interface CarbonVoiceMessage {
   text_models: CarbonVoiceTextModel[]
   attachments: CarbonVoiceAttachment[]
   notes: string
-  // AI responses attached to this message (from the v5 recent payload). Empty when none exist.
-  ai_response_ids: CarbonVoiceAiResponseRef[]
+  // AI responses attached to this message. Only the v5 recent payload carries these; the v3
+  // endpoint (currently in use) omits them, so message → artifact links are built from the
+  // /responses feed's message_ids instead. Present again once sync moves back to v5.
+  ai_response_ids?: CarbonVoiceAiResponseRef[]
 }
 
 // Messages (v5 — used by /v5/messages/{id}, richer shape)
