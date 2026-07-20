@@ -26,17 +26,15 @@ interface RenderedAiResponse {
 // lookup and each response is written at most once — whether reached via the /responses feed or an
 // individual fallback fetch. `byMessage` maps a source message id to the response ids attributed to
 // it (from each response's message_ids) — this is how a message finds its artifacts without relying
-// on the v5 message payload's ai_response_ids, so linking works on the v3 endpoint. `channelNames`
-// caches a channel_id's display name (one getChannel per channel), and `claimedChannels` tracks
-// which channel owns each artifact channel-folder so two same-named conversations don't share one
-// folder — mirroring the Conversations tree.
+// on the v5 message payload's ai_response_ids, so linking works on the v3 endpoint. `claimedArtifacts`
+// tracks which response owns each artifact note path this run so two responses that share a
+// date + type + prompt + workspace don't overwrite each other.
 interface AiContext {
   promptNames: Map<string, string>
   workspaces: Map<string, string>
   index: Map<string, RenderedAiResponse | null>
   byMessage: Map<string, Set<string>>
-  channelNames: Map<string, string>
-  claimedChannels: Map<string, string>
+  claimedArtifacts: Map<string, string>
 }
 
 export interface SyncResult {
@@ -48,12 +46,13 @@ export interface SyncResult {
 
 // Live progress reported to the caller so a toast can show work as it happens. `fetching` covers
 // the message pull (only `fetched` is meaningful then); `writing` covers note creation, where the
-// running `conversations` / `voiceMemos` counts climb as files are saved.
+// running `conversations` / `voiceMemos` / `artifacts` counts climb as files are saved.
 export interface SyncProgress {
   phase: 'fetching' | 'writing'
   fetched: number
   conversations: number
   voiceMemos: number
+  artifacts: number
 }
 
 const PAGE = 50
@@ -95,6 +94,7 @@ views:
       - file.name
       - prompt_name
       - workspace_name
+      - source_type
       - date
     sort:
       - property: date
@@ -151,7 +151,13 @@ export class CarbonVoiceSync {
       return { firstRun: true, conversations: 0, voiceMemos: 0, artifacts: 0 }
     }
 
-    const progress: SyncProgress = { phase: 'fetching', fetched: 0, conversations: 0, voiceMemos: 0 }
+    const progress: SyncProgress = {
+      phase: 'fetching',
+      fetched: 0,
+      conversations: 0,
+      voiceMemos: 0,
+      artifacts: 0,
+    }
     const messages = await this.collectMessagesSince(api, since, n => {
       progress.fetched = n
       onProgress?.(progress)
@@ -161,7 +167,10 @@ export class CarbonVoiceSync {
     const convMsgs = await this.selectConversationMessages(api, messages)
 
     const ai = await this.buildAiContext(api)
-    const artifacts = await this.syncResponses(api, since, ai)
+    const artifacts = await this.syncResponses(api, since, ai, n => {
+      progress.artifacts = n
+      onProgress?.(progress)
+    })
     const voiceMemos = await this.processVoiceMemos(api, memos, ai, () => {
       progress.voiceMemos++
       onProgress?.(progress)
@@ -176,9 +185,10 @@ export class CarbonVoiceSync {
     return { firstRun: false, conversations, voiceMemos, artifacts }
   }
 
-  // Explicit historical pull for BOTH categories in a single fetch — the recents endpoint
-  // returns everything, so fetching once and splitting avoids re-pulling and dropping messages.
-  // Each category is filtered to its own window. Does not touch the incremental baseline.
+  // Explicit historical pull for conversations and voice memos — both come from the messages
+  // endpoint, so they're fetched together in a single pass and split per category. Each has its own
+  // window and can be set to 'none' to skip it. AI responses are imported separately (they use a
+  // different endpoint) via importArtifacts. Does not touch the incremental baseline.
   async importHistory(
     conversationWindow: HistoryWindow,
     voiceMemoWindow: HistoryWindow,
@@ -186,52 +196,76 @@ export class CarbonVoiceSync {
   ): Promise<SyncResult> {
     const api = new CarbonVoiceAPI(this.settings.apiToken)
     await this.ensureBaseViews()
-    const convSince = this.windowToSince(conversationWindow)
-    const memoSince = this.windowToSince(voiceMemoWindow)
-    // Fetch once over the larger of the two windows, then filter each category by its own.
-    const earliest = convSince < memoSince ? convSince : memoSince
-    const progress: SyncProgress = { phase: 'fetching', fetched: 0, conversations: 0, voiceMemos: 0 }
+    const progress: SyncProgress = {
+      phase: 'fetching',
+      fetched: 0,
+      conversations: 0,
+      voiceMemos: 0,
+      artifacts: 0,
+    }
+    const doConv = conversationWindow !== 'none'
+    const doMemo = voiceMemoWindow !== 'none'
+    if (!doConv && !doMemo) {
+      return { firstRun: false, conversations: 0, voiceMemos: 0, artifacts: 0 }
+    }
+
+    const convSince = doConv ? this.windowToSince(conversationWindow) : null
+    const memoSince = doMemo ? this.windowToSince(voiceMemoWindow) : null
+    // Fetch once over the earliest requested window, then filter each category by its own.
+    const earliest = [convSince, memoSince]
+      .filter((s): s is string => s != null)
+      .reduce((a, b) => (a < b ? a : b))
     const messages = await this.collectMessagesSince(api, earliest, n => {
       progress.fetched = n
       onProgress?.(progress)
     })
     progress.phase = 'writing'
 
+    // The /responses feed over the same window, so the message notes written below can link to
+    // their artifacts (populates ai.byMessage). Honours the AI-responses toggle inside syncResponses.
     const ai = await this.buildAiContext(api)
-    const artifacts = await this.syncResponses(api, earliest, ai)
-
-    const memoMsgs = messages.filter(
-      m => m.created_at >= memoSince && this.isVoiceMemo(m) && this.memoInScope(m)
-    )
-    const voiceMemos = await this.processVoiceMemos(api, memoMsgs, ai, () => {
-      progress.voiceMemos++
+    const artifacts = await this.syncResponses(api, earliest, ai, n => {
+      progress.artifacts = n
       onProgress?.(progress)
     })
 
-    const convCandidates = messages.filter(m => m.created_at >= convSince)
-    const convMsgs = await this.selectConversationMessages(api, convCandidates)
-    const conversations = await this.processConversations(api, convMsgs, ai, () => {
-      progress.conversations++
-      onProgress?.(progress)
-    })
+    let voiceMemos = 0
+    if (doMemo) {
+      const memoMsgs = messages.filter(
+        m => m.created_at >= memoSince! && this.isVoiceMemo(m) && this.memoInScope(m)
+      )
+      voiceMemos = await this.processVoiceMemos(api, memoMsgs, ai, () => {
+        progress.voiceMemos++
+        onProgress?.(progress)
+      })
+    }
+
+    let conversations = 0
+    if (doConv) {
+      const convCandidates = messages.filter(m => m.created_at >= convSince!)
+      const convMsgs = await this.selectConversationMessages(api, convCandidates)
+      conversations = await this.processConversations(api, convMsgs, ai, () => {
+        progress.conversations++
+        onProgress?.(progress)
+      })
+    }
 
     return { firstRun: false, conversations, voiceMemos, artifacts }
   }
 
-  // Explicit historical import of AI responses only, over `window`, straight from the /responses
-  // feed. Writes (or refreshes) artifact notes without touching messages or the incremental
-  // baseline; honours the conversation scope, like the feed pass in a normal sync. Message → artifact
-  // links fill in on the next sync/import that rewrites the message notes. Returns the count written.
+  // Explicit historical import of AI responses only, over `window` (or nothing when 'none'), straight
+  // from the /responses feed — a different endpoint from the message import above. Writes/refreshes
+  // artifact notes without touching messages or the incremental baseline; honours the conversation
+  // scope. Message → artifact links fill in on the next message sync/import. Returns the count written.
   async importArtifacts(
     window: HistoryWindow,
     onProgress?: (written: number) => void
   ): Promise<number> {
-    if (!this.settings.includeAiResponses) return 0
+    if (window === 'none' || !this.settings.includeAiResponses) return 0
     const api = new CarbonVoiceAPI(this.settings.apiToken)
     await this.ensureBaseViews()
-    const since = this.windowToSince(window)
     const ai = await this.buildAiContext(api)
-    return this.syncResponses(api, since, ai, onProgress)
+    return this.syncResponses(api, this.windowToSince(window), ai, onProgress)
   }
 
   // ── Message fetching ────────────────────────────────────────────────────
@@ -865,8 +899,7 @@ export class CarbonVoiceSync {
       workspaces,
       index: new Map(),
       byMessage: new Map(),
-      channelNames: new Map(),
-      claimedChannels: new Map(),
+      claimedArtifacts: new Map(),
     }
   }
 
@@ -899,7 +932,7 @@ export class CarbonVoiceSync {
         if (
           !ai.index.has(resp.id) &&
           this.responseInConvScope(resp) &&
-          (await this.writeArtifact(api, resp, ai))
+          (await this.writeArtifact(resp, ai))
         ) {
           written++
           onWritten?.(written)
@@ -930,7 +963,7 @@ export class CarbonVoiceSync {
     for (const ref of m.ai_response_ids ?? []) {
       if (!ai.index.has(ref.id)) {
         try {
-          await this.writeArtifact(api, await api.getResponse(ref.id), ai)
+          await this.writeArtifact(await api.getResponse(ref.id), ai)
         } catch (err) {
           console.warn(`Carbon Voice: could not fetch AI response ${ref.id}`, err)
           ai.index.set(ref.id, null)
@@ -949,13 +982,10 @@ export class CarbonVoiceSync {
   // Writes one response's artifact note (upserted, since a response can be regenerated) and records
   // it in `ai.index`. Records null — so it's never retried — when the response renders no body.
   // Returns true when a note was written. The note path is
-  //   Artifacts/<workspace>/<prompt name>/<conversation>/<truncated response> (<short id>).md
-  // browsable by workspace, prompt and conversation; the response id keeps each leaf unique.
-  private async writeArtifact(
-    api: CarbonVoiceAPI,
-    resp: CarbonVoiceAiResponse,
-    ai: AiContext
-  ): Promise<boolean> {
+  //   AI artifacts/<workspace>/<prompt name>/<date>-<voice memo|conversation message>.md
+  // browsable by workspace and prompt; a short response-id tag is appended only when a *different*
+  // response would otherwise collide (see resolveArtifactNotePath).
+  private async writeArtifact(resp: CarbonVoiceAiResponse, ai: AiContext): Promise<boolean> {
     const body = renderAiResponseBody(resp)
     if (!body) {
       ai.index.set(resp.id, null)
@@ -963,13 +993,12 @@ export class CarbonVoiceSync {
     }
     const promptName = ai.promptNames.get(resp.prompt_id) || 'AI Response'
     const wsName = (resp.workspace_id && ai.workspaces.get(resp.workspace_id)) || ''
-    const parentBase = normalizePath(
-      `${this.root()}/Artifacts/${sanitize(wsName || 'Unfiled')}/${sanitize(promptName)}`
+    const date = resp.created_at ? resp.created_at.slice(0, 10) : 'undated'
+    const folder = normalizePath(
+      `${this.root()}/AI artifacts/${sanitize(wsName || 'Unfiled')}/${sanitize(promptName)}`
     )
-    const channelFolder = await this.resolveArtifactChannelFolder(api, parentBase, resp.channel_id, ai)
-    const short = resp.id.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || resp.id
-    const leaf = sanitize(`${truncateTitle(aiResponseTitle(resp)) || 'Response'} (${short})`)
-    const linkTarget = normalizePath(`${channelFolder}/${leaf}`)
+    const base = normalizePath(`${folder}/${sanitize(`${date}-${artifactSourceType(resp)}`)}`)
+    const linkTarget = await this.resolveArtifactNotePath(base, resp.id, ai.claimedArtifacts)
     await this.upsertFile(`${linkTarget}.md`, this.buildArtifactNote(resp, promptName, wsName, body))
     ai.index.set(resp.id, { promptName, linkTarget })
     // Attribute this response to each of its source messages so those messages can link to it
@@ -982,47 +1011,40 @@ export class CarbonVoiceSync {
     return true
   }
 
-  // The conversation folder for a response's artifacts, using the channel's display name (not its
-  // id). Mirrors resolveChannelFolder: a channel keeps its clean name unless a *different* channel
-  // already owns that folder — on disk (via the artifact notes' cv_conversation_id) or claimed
-  // earlier this run — in which case a short channel-id tag is appended so two same-named
-  // conversations never share a folder. Responses with no channel (e.g. voice memos) go under
-  // "Unfiled".
-  private async resolveArtifactChannelFolder(
-    api: CarbonVoiceAPI,
-    parentBase: string,
-    channelId: string | null,
-    ai: AiContext
+  // Picks the artifact note path (no extension) for a response. It keeps the readable
+  // <date>-<type> base unless a *different* response already owns that path — on disk (via the
+  // note's cv_response_id) or claimed earlier this run — in which case a short response-id tag is
+  // appended so two responses sharing a date + type + prompt + workspace never overwrite each other.
+  // Identity is cv_response_id, so re-syncing the same response reuses its file in place. Mirrors
+  // resolveMemoNotePath.
+  private async resolveArtifactNotePath(
+    base: string,
+    responseId: string,
+    claimed: Map<string, string>
   ): Promise<string> {
-    if (!channelId) return normalizePath(`${parentBase}/Unfiled`)
-    const base = normalizePath(`${parentBase}/${sanitize(await this.artifactChannelName(api, channelId, ai))}`)
-    const owner = ai.claimedChannels.get(base) ?? (await this.channelIdAt(base))
+    const owner = claimed.get(base) ?? (await this.responseIdAt(`${base}.md`))
     let chosen = base
-    if (owner != null && owner !== channelId) {
-      chosen = normalizePath(`${base} (${channelId.slice(0, 8)})`)
+    if (owner != null && owner !== responseId) {
+      const short = responseId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || responseId
+      chosen = normalizePath(`${base} (${short})`)
+      const tagOwner = claimed.get(chosen) ?? (await this.responseIdAt(`${chosen}.md`))
+      if (tagOwner != null && tagOwner !== responseId) {
+        chosen = normalizePath(`${base} (${responseId})`)
+      }
     }
-    ai.claimedChannels.set(chosen, channelId)
+    claimed.set(chosen, responseId)
     return chosen
   }
 
-  // A channel's display name for artifact paths, fetched once per run (cache-first). Falls back to
-  // the raw channel id if the channel can't be fetched (e.g. deleted → 403), so distinct channels
-  // still get distinct folders.
-  private async artifactChannelName(
-    api: CarbonVoiceAPI,
-    channelId: string,
-    ai: AiContext
-  ): Promise<string> {
-    const cached = ai.channelNames.get(channelId)
-    if (cached !== undefined) return cached
-    let name = channelId
-    try {
-      name = channelName(await api.getChannel(channelId))
-    } catch (err) {
-      console.warn(`Carbon Voice: could not fetch channel ${channelId} for artifact path`, err)
-    }
-    ai.channelNames.set(channelId, name)
-    return name
+  // The cv_response_id recorded in an artifact note's frontmatter, or null if no note (or no id)
+  // lives at `path`. Cache-first; only reads the file on a genuine path collision.
+  private async responseIdAt(path: string): Promise<string | null> {
+    const f = this.app.vault.getAbstractFileByPath(normalizePath(path))
+    if (!(f instanceof TFile)) return null
+    const cached: unknown = this.app.metadataCache.getFileCache(f)?.frontmatter?.cv_response_id
+    if (typeof cached === 'string') return cached
+    const match = (await this.app.vault.read(f)).match(/^cv_response_id:\s*(\S+)/m)
+    return match ? match[1] : null
   }
 
   // The note for one AI response: the rendered body plus links back to the source message(s). The
@@ -1045,6 +1067,7 @@ export class CarbonVoiceSync {
     ]
     if (wsName) fm.push(`workspace_name: ${yaml(wsName)}`)
     if (resp.workspace_id) fm.push(`workspace_id: ${resp.workspace_id}`)
+    fm.push(`source_type: ${yaml(artifactSourceType(resp))}`)
     if (resp.channel_id) fm.push(`cv_conversation_id: ${resp.channel_id}`)
     // Source message ids: a plural list (a response can span several messages) plus a singular
     // `cv_message_id` for the common one-message case, so the artifact is queryable from either.
@@ -1071,6 +1094,9 @@ export class CarbonVoiceSync {
 
   private windowToSince(window: HistoryWindow): string {
     if (window === 'all') return '1970-01-01T00:00:00.000Z'
+    // 'none' means "skip this category" and is filtered out by callers before they reach here; guard
+    // anyway so a stray call can't produce an invalid (NaN) date.
+    if (window === 'none') return new Date().toISOString()
     return new Date(Date.now() - window * 24 * 60 * 60 * 1000).toISOString()
   }
 
@@ -1388,20 +1414,10 @@ function renderAiResponseBody(resp: CarbonVoiceAiResponse): string | null {
   return null
 }
 
-// Plain-text lead of a response, used to build a human-readable artifact filename. Prefers the
-// text/markdown of the first variant that has content; falls back to the values of a structured
-// (json) response. Empty when nothing renders — the caller then names the file "Response".
-function aiResponseTitle(resp: CarbonVoiceAiResponse): string {
-  for (const v of resp.responses ?? []) {
-    const t = (v.text || v.markdown)?.trim()
-    if (t) return t
-    if (v.json && Object.keys(v.json).length) {
-      return Object.values(v.json)
-        .map(x => String(x))
-        .join(' ')
-    }
-  }
-  return ''
+// Whether a response is attached to a conversation message or a voice memo — voice memos have no
+// channel. Drives the artifact filename and the note's `source_type` field.
+function artifactSourceType(resp: CarbonVoiceAiResponse): string {
+  return resp.channel_id ? 'conversation message' : 'voice memo'
 }
 
 function workspaceName(c: CarbonVoiceChannel): string {

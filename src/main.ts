@@ -232,5 +232,6 @@ function progressMessage(prefix: string, p: SyncProgress): string {
   if (p.phase === 'fetching') {
     return `${prefix} fetched ${p.fetched} message${p.fetched === 1 ? '' : 's'}…`
   }
-  return `${prefix} ${p.voiceMemos} voice memo(s), ${p.conversations} conversation file(s)…`
+  const artifacts = p.artifacts > 0 ? `, ${p.artifacts} AI response(s)` : ''
+  return `${prefix} ${p.voiceMemos} voice memo(s), ${p.conversations} conversation file(s)${artifacts}…`
 }

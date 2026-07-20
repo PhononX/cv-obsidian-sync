@@ -1,5 +1,5 @@
 export type SyncScope = 'all' | 'by_workspace' | 'by_conversation' | 'by_folder'
-export type HistoryWindow = 7 | 30 | 90 | 365 | 'all'
+export type HistoryWindow = 7 | 30 | 90 | 365 | 'all' | 'none'
 // How a conversation's messages are chunked into note files: one file per calendar month, ISO
 // week (Monday-started), or day. All boundaries are UTC, matching the message-fetch windows.
 export type MessageGrouping = 'month' | 'week' | 'day'

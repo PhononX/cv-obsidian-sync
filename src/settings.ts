@@ -373,7 +373,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
 
     new Setting(containerEl).setName('Historical import').setHeading()
     containerEl.createEl('p', {
-      text: 'Forward sync only pulls new activity. Import older data once — both categories are fetched together in a single pass, each using its own window and honouring its scope above.',
+      text: 'Forward sync only pulls new activity. Import older data once. Conversations and voice memos share the messages endpoint and are fetched together; set either to None to skip it.',
       cls: 'setting-item-description',
     })
 
@@ -382,7 +382,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Import now')
-      .setDesc('Fetch and write both categories for the windows above')
+      .setDesc('Fetch and write conversations and voice memos for the windows above')
       .addButton(btn =>
         btn
           .setButtonText('Import')
@@ -416,6 +416,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
   ): void {
     new Setting(containerEl).setName(name).addDropdown(drop =>
       drop
+        .addOption('none', 'None')
         .addOption('7', 'Last 7 days')
         .addOption('30', 'Last 30 days')
         .addOption('90', 'Last 90 days')
@@ -424,7 +425,11 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
         .setValue(String(this.plugin.settings[windowKey]))
         .onChange(async value => {
           this.plugin.settings[windowKey] =
-            value === 'all' ? 'all' : (parseInt(value) as 7 | 30 | 90 | 365)
+            value === 'none'
+              ? 'none'
+              : value === 'all'
+                ? 'all'
+                : (parseInt(value) as 7 | 30 | 90 | 365)
           await this.plugin.saveSettings()
         })
     )
