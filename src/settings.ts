@@ -392,12 +392,27 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
             this.display()
           })
       )
+
+    // AI responses (artifacts) import — a separate pass over the /responses feed, so users can pull
+    // historical AI responses on their own window without re-importing every message.
+    if (this.plugin.settings.includeAiResponses) {
+      this.renderHistoryWindow(containerEl, 'AI response history', 'artifactHistoryWindow')
+      new Setting(containerEl)
+        .setName('Import AI responses')
+        .setDesc('Fetch and write AI responses (artifacts) for the window above, honouring the conversation scope')
+        .addButton(btn =>
+          btn.setButtonText('Import responses').onClick(async () => {
+            await this.plugin.runImportArtifacts()
+            this.display()
+          })
+        )
+    }
   }
 
   private renderHistoryWindow(
     containerEl: HTMLElement,
     name: string,
-    windowKey: 'conversationHistoryWindow' | 'voiceMemoHistoryWindow'
+    windowKey: 'conversationHistoryWindow' | 'voiceMemoHistoryWindow' | 'artifactHistoryWindow'
   ): void {
     new Setting(containerEl).setName(name).addDropdown(drop =>
       drop

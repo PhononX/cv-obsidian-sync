@@ -218,6 +218,22 @@ export class CarbonVoiceSync {
     return { firstRun: false, conversations, voiceMemos, artifacts }
   }
 
+  // Explicit historical import of AI responses only, over `window`, straight from the /responses
+  // feed. Writes (or refreshes) artifact notes without touching messages or the incremental
+  // baseline; honours the conversation scope, like the feed pass in a normal sync. Message → artifact
+  // links fill in on the next sync/import that rewrites the message notes. Returns the count written.
+  async importArtifacts(
+    window: HistoryWindow,
+    onProgress?: (written: number) => void
+  ): Promise<number> {
+    if (!this.settings.includeAiResponses) return 0
+    const api = new CarbonVoiceAPI(this.settings.apiToken)
+    await this.ensureBaseViews()
+    const since = this.windowToSince(window)
+    const ai = await this.buildAiContext(api)
+    return this.syncResponses(api, since, ai, onProgress)
+  }
+
   // ── Message fetching ────────────────────────────────────────────────────
 
   // All messages updated at/after `sinceIso`, paging forward by last_updated_at.
@@ -858,7 +874,12 @@ export class CarbonVoiceSync {
   // writing each to its own artifact note. This is the primary artifact sync: it captures responses
   // even for messages outside the synced scope, and populates `ai.index` so message linking is a
   // lookup rather than a per-message fetch. Returns the number of artifact notes written.
-  private async syncResponses(api: CarbonVoiceAPI, sinceIso: string, ai: AiContext): Promise<number> {
+  private async syncResponses(
+    api: CarbonVoiceAPI,
+    sinceIso: string,
+    ai: AiContext,
+    onWritten?: (n: number) => void
+  ): Promise<number> {
     if (!this.settings.includeAiResponses) return 0
     let written = 0
     let cursor = sinceIso
@@ -879,8 +900,10 @@ export class CarbonVoiceSync {
           !ai.index.has(resp.id) &&
           this.responseInConvScope(resp) &&
           (await this.writeArtifact(api, resp, ai))
-        )
+        ) {
           written++
+          onWritten?.(written)
+        }
         // Advance by created_at — the feed's `date` orders by creation, like the message scans.
         if (resp.created_at > newest) newest = resp.created_at
       }

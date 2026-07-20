@@ -40,7 +40,9 @@ into your Obsidian vault as Markdown notes.
   **Artifacts** folder, organised as `Artifacts/<workspace>/<prompt>/<conversation>/`. Each message
   links out to its responses, and every artifact backlinks to the message(s) it came from — so a
   response shared across messages is one note, reachable from all of them. An "All AI Responses"
-  Base lists them in one place. Toggle off with the **Include AI responses** setting.
+  Base lists them in one place. Toggle off with the **Include AI responses** setting, or pull past
+  ones with the separate **Import AI responses** action (its own time window) under Historical
+  import.
 - **Audio playback in your notes** — listen right next to the transcript. Choose how:
   - _Embed player_ (default) — inline Carbon Voice player, nothing stored in your vault;
     private messages show their own locked state.

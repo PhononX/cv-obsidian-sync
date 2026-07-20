@@ -108,6 +108,37 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
     }
   }
 
+  // Explicit historical import of AI responses (artifacts) only, over the artifact history window.
+  async runImportArtifacts(): Promise<void> {
+    if (this.isSyncing) {
+      new Notice('Carbon Voice: A sync is already running')
+      return
+    }
+    if (!this.settings.apiToken) {
+      new Notice('Carbon Voice: Add an API token in settings first')
+      return
+    }
+    if (!this.settings.includeAiResponses) {
+      new Notice('Carbon Voice: Turn on "Include AI responses" first')
+      return
+    }
+    this.isSyncing = true
+    const notice = new Notice('Carbon Voice: Importing AI responses…', 0)
+    try {
+      const count = await this.sync.importArtifacts(this.settings.artifactHistoryWindow, n =>
+        notice.setMessage(`Carbon Voice: Importing AI responses… ${n} written`)
+      )
+      notice.hide()
+      new Notice(`Carbon Voice: Imported ${count} AI response(s)`)
+    } catch (err) {
+      notice.hide()
+      new Notice(`Carbon Voice: AI response import failed — ${errMessage(err)}`)
+    } finally {
+      this.isSyncing = false
+      this.refreshPanel()
+    }
+  }
+
   // Opens (or reveals) the Carbon Voice panel as a tab in the main editor area. Reuses an existing
   // Carbon Voice leaf if one is already open (sidebar or main) rather than spawning duplicates.
   // Kicks off a sync on open so the panel reflects fresh data (skipped when no token is set;

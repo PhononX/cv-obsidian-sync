@@ -369,6 +369,9 @@ export interface CarbonVoiceSettings {
 
   conversationHistoryWindow: HistoryWindow
   voiceMemoHistoryWindow: HistoryWindow
+  // Window for the separate "Import AI responses" action — pulls artifacts from the /responses feed
+  // over this range, independent of the message import.
+  artifactHistoryWindow: HistoryWindow
 }
 
 export const DEFAULT_SETTINGS: CarbonVoiceSettings = {
@@ -399,4 +402,5 @@ export const DEFAULT_SETTINGS: CarbonVoiceSettings = {
 
   conversationHistoryWindow: 30,
   voiceMemoHistoryWindow: 30,
+  artifactHistoryWindow: 30,
 }
