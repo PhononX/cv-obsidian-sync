@@ -104,7 +104,7 @@ export class CarbonVoiceSync {
     }
 
     const progress: SyncProgress = { phase: 'fetching', fetched: 0, conversations: 0, voiceMemos: 0 }
-    const messages = await this.collectMessagesSince(api, since, n => {
+    const messages = await this.collectMessagesSince(api, since, true, n => {
       progress.fetched = n
       onProgress?.(progress)
     })
@@ -141,7 +141,7 @@ export class CarbonVoiceSync {
     // Fetch once over the larger of the two windows, then filter each category by its own.
     const earliest = convSince < memoSince ? convSince : memoSince
     const progress: SyncProgress = { phase: 'fetching', fetched: 0, conversations: 0, voiceMemos: 0 }
-    const messages = await this.collectMessagesSince(api, earliest, n => {
+    const messages = await this.collectMessagesSince(api, earliest, false, n => {
       progress.fetched = n
       onProgress?.(progress)
     })
@@ -167,10 +167,14 @@ export class CarbonVoiceSync {
 
   // ── Message fetching ────────────────────────────────────────────────────
 
-  // All messages updated at/after `sinceIso`, paging forward by last_updated_at.
+  // All messages at/after `sinceIso`, paging forward. `useLastUpdated` chooses which timestamp
+  // drives the scan: `true` (incremental sync) walks by last_updated_at so status changes since the
+  // baseline are re-pulled; `false` (historical import) walks by created_at so a window means
+  // messages *created* in it — no over-fetch of old-but-recently-touched rows, no MAX_PAGES burn.
   private async collectMessagesSince(
     api: CarbonVoiceAPI,
     sinceIso: string,
+    useLastUpdated: boolean,
     onFetch?: (total: number) => void
   ): Promise<CarbonVoiceMessage[]> {
     const out = new Map<string, CarbonVoiceMessage>()
@@ -179,14 +183,14 @@ export class CarbonVoiceSync {
       const page = await api.getRecentMessages({
         date: cursor,
         direction: 'newer',
-        use_last_updated: true,
+        use_last_updated: useLastUpdated,
         limit: PAGE,
       })
       if (page.length === 0) break
       let newest = cursor
       for (const m of page) {
         out.set(m.message_id, m)
-        const ts = m.last_updated_at || m.created_at
+        const ts = (useLastUpdated ? m.last_updated_at : m.created_at) || m.created_at
         if (ts > newest) newest = ts
       }
       onFetch?.(out.size)
