@@ -108,7 +108,7 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
     }
   }
 
-  // Explicit historical import of AI responses (artifacts) only, over the artifact history window.
+  // Explicit historical import of AI artifacts only, over the artifact history window.
   async runImportArtifacts(): Promise<void> {
     if (this.isSyncing) {
       new Notice('Carbon Voice: A sync is already running')
@@ -119,20 +119,20 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
       return
     }
     if (!this.settings.includeAiResponses) {
-      new Notice('Carbon Voice: Turn on "Include AI responses" first')
+      new Notice('Carbon Voice: Turn on "Sync AI artifacts" first')
       return
     }
     this.isSyncing = true
-    const notice = new Notice('Carbon Voice: Importing AI responses…', 0)
+    const notice = new Notice('Carbon Voice: Importing AI artifacts…', 0)
     try {
       const count = await this.sync.importArtifacts(this.settings.artifactHistoryWindow, n =>
-        notice.setMessage(`Carbon Voice: Importing AI responses… ${n} written`)
+        notice.setMessage(`Carbon Voice: Importing AI artifacts… ${n} written`)
       )
       notice.hide()
-      new Notice(`Carbon Voice: Imported ${count} AI response(s)`)
+      new Notice(`Carbon Voice: Imported ${count} AI artifact(s)`)
     } catch (err) {
       notice.hide()
-      new Notice(`Carbon Voice: AI response import failed — ${errMessage(err)}`)
+      new Notice(`Carbon Voice: AI artifact import failed — ${errMessage(err)}`)
     } finally {
       this.isSyncing = false
       this.refreshPanel()
@@ -222,7 +222,7 @@ function summarizeResult(res: SyncResult): string {
     `${res.conversations} conversation file(s)`,
     `${res.voiceMemos} voice memo(s)`,
   ]
-  if (res.artifacts > 0) parts.push(`${res.artifacts} AI response(s)`)
+  if (res.artifacts > 0) parts.push(`${res.artifacts} AI artifact(s)`)
   return parts.join(', ')
 }
 
@@ -232,6 +232,6 @@ function progressMessage(prefix: string, p: SyncProgress): string {
   if (p.phase === 'fetching') {
     return `${prefix} fetched ${p.fetched} message${p.fetched === 1 ? '' : 's'}…`
   }
-  const artifacts = p.artifacts > 0 ? `, ${p.artifacts} AI response(s)` : ''
+  const artifacts = p.artifacts > 0 ? `, ${p.artifacts} AI artifact(s)` : ''
   return `${prefix} ${p.voiceMemos} voice memo(s), ${p.conversations} conversation file(s)${artifacts}…`
 }

@@ -369,7 +369,7 @@ export interface CarbonVoiceSettings {
 
   conversationHistoryWindow: HistoryWindow
   voiceMemoHistoryWindow: HistoryWindow
-  // Window for the separate "Import AI responses" action — pulls artifacts from the /responses feed
+  // Window for the separate "Import AI artifacts" action — pulls artifacts from the /responses feed
   // over this range, independent of the message import.
   artifactHistoryWindow: HistoryWindow
 }

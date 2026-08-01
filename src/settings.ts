@@ -257,9 +257,9 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
       )
 
     new Setting(containerEl)
-      .setName('Include AI responses')
+      .setName('Sync AI artifacts')
       .setDesc(
-        'Pull the AI responses attached to a message (e.g. summaries, action items) into the note'
+        'Sync AI artifacts (summaries, action items and other prompt outputs) into an AI artifacts folder, linked from each message'
       )
       .addToggle(toggle =>
         toggle
@@ -393,20 +393,19 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
           })
       )
 
-    // AI responses (artifacts) import — a separate pass over the /responses feed, so users can pull
-    // historical AI responses on their own window without re-importing every message.
-    if (this.plugin.settings.includeAiResponses) {
-      this.renderHistoryWindow(containerEl, 'AI response history', 'artifactHistoryWindow')
-      new Setting(containerEl)
-        .setName('Import AI responses')
-        .setDesc('Fetch and write AI responses (artifacts) for the window above, honouring the conversation scope')
-        .addButton(btn =>
-          btn.setButtonText('Import responses').onClick(async () => {
-            await this.plugin.runImportArtifacts()
-            this.display()
-          })
-        )
-    }
+    // AI artifacts import — a separate pass over the /responses feed (a different endpoint from the
+    // message import above), so users can pull historical AI artifacts on their own window. Requires
+    // "Sync AI artifacts" to be on (the button reminds them if not).
+    this.renderHistoryWindow(containerEl, 'AI artifact history', 'artifactHistoryWindow')
+    new Setting(containerEl)
+      .setName('Import AI artifacts')
+      .setDesc('Fetch and write AI artifacts for the window above, honouring the conversation scope')
+      .addButton(btn =>
+        btn.setButtonText('Import artifacts').onClick(async () => {
+          await this.plugin.runImportArtifacts()
+          this.display()
+        })
+      )
   }
 
   private renderHistoryWindow(

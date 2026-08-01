@@ -81,7 +81,7 @@ views:
       - conversation_link
 `
 
-// Ready-made "All AI Responses" Bases view, written at the sync root. Selects artifact notes by
+// Ready-made "All AI Artifacts" Bases view, written at the sync root. Selects artifact notes by
 // their tag and lists them newest-first. `file.name` is the clickable column that opens the
 // artifact; open the backlinks pane on any artifact to see the messages that reference it.
 const ARTIFACTS_BASE = `filters:
@@ -89,7 +89,7 @@ const ARTIFACTS_BASE = `filters:
     - file.hasTag("ai-response")
 views:
   - type: table
-    name: All AI responses
+    name: All AI artifacts
     order:
       - file.name
       - prompt_name
@@ -1174,7 +1174,7 @@ export class CarbonVoiceSync {
     await this.createIfAbsent(`${this.root()}/Conversations by Date.base`, CONVERSATIONS_BASE)
     await this.createIfAbsent(`${this.root()}/All Voice Memos.base`, VOICE_MEMOS_BASE)
     if (this.settings.includeAiResponses) {
-      await this.createIfAbsent(`${this.root()}/All AI Responses.base`, ARTIFACTS_BASE)
+      await this.createIfAbsent(`${this.root()}/All AI Artifacts.base`, ARTIFACTS_BASE)
     }
   }
 

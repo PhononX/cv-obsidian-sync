@@ -36,13 +36,13 @@ into your Obsidian vault as Markdown notes.
   are created once and never overwritten, so you can annotate them freely.
 - **AI summaries** — a voice memo's Carbon Voice summary is written into a `## Summary`
   section at the top of its note.
-- **AI responses** — AI responses (summaries, action items and other prompt outputs) sync into an
+- **AI artifacts** — AI outputs (summaries, action items and other prompt responses) sync into an
   **AI artifacts** folder, organised as `AI artifacts/<workspace>/<prompt>/`, one note per response
-  named `<date>-<voice memo | conversation message>`. Each message links out to its responses, and
+  named `<date>-<voice memo | conversation message>`. Each message links out to its artifacts, and
   every artifact backlinks to the message(s) it came from — so a response shared across messages is
-  one note, reachable from all of them. An "All AI Responses" Base lists them in one place. Toggle
-  off with the **Include AI responses** setting, or pull past ones with the separate **Import AI
-  responses** action (its own time window) under Historical import.
+  one note, reachable from all of them. An "All AI Artifacts" Base lists them in one place. Toggle
+  off with the **Sync AI artifacts** setting, or pull past ones with the separate **Import AI
+  artifacts** action (its own time window) under Historical import.
 - **Audio playback in your notes** — listen right next to the transcript. Choose how:
   - _Embed player_ (default) — inline Carbon Voice player, nothing stored in your vault;
     private messages show their own locked state.
