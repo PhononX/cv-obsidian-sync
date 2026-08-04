@@ -175,17 +175,16 @@ export class CarbonVoiceAPI {
 
   // ── Messages ──────────────────────────────────────────────────────────────
 
-  // Returns messages across all channels (or one channel via channel_id).
-  // Voice memos have type === 'voicememo' and a folder_id.
+  // POST /v3/messages/recent — the previous message feed. Sync now uses the v5 endpoints below;
+  // this is kept as a fallback for easy rollback and is currently unused.
   async getRecentMessages(params: MessageQueryParams): Promise<CarbonVoiceMessage[]> {
     return this.post<CarbonVoiceMessage[]>('/v3/messages/recent', params)
   }
 
-  // The v5 message endpoints (GET). NOT yet wired into sync — getRecentMessages above stays on v3
-  // until v5 is public — but kept current with the contract (and mapRecentV5ToMessage) so switching
-  // over is a small change. Both are keyset-paginated: caller pages with `date`+`direction`, then
-  // `cursor`+`direction` while `hasMore`. The server shifts a first `newer` page's `date` back 4s to
-  // avoid missing just-written rows; a cursor drives paging strictly with no such offset.
+  // The v5 message endpoints (GET) — the live feeds sync now uses. Both are keyset-paginated: the
+  // caller pages with `date`+`direction`, then `cursor`+`direction` while `hasMore`. The server
+  // shifts a first `newer` page's `date` back 4s to avoid missing just-written rows; a cursor drives
+  // paging strictly with no such offset. Each row is normalised via mapRecentV5ToMessage.
 
   // GET /v5/messages — messages ordered by created_at. This is the history-import feed.
   async getMessagesV5(params: MessagesV5QueryParams): Promise<MessagePageV5> {

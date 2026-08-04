@@ -1,6 +1,7 @@
 import { TFile, TFolder, normalizePath } from 'obsidian'
 import type CarbonVoiceSyncPlugin from './main'
 import { CarbonVoiceAPI } from './api'
+import type { MessagePageV5, MessagesV5QueryParams } from './api'
 import type {
   CarbonVoiceMessage,
   CarbonVoiceChannel,
@@ -56,6 +57,9 @@ export interface SyncProgress {
 }
 
 const PAGE = 50
+// v5 message feeds are keyset-paginated and reliable at their default page size, so we request the
+// larger page to cut round-trips (the /responses feed keeps the smaller PAGE).
+const MESSAGE_PAGE = 200
 const MAX_PAGES = 500 // safety cap on pagination loops
 
 // Ready-made Obsidian Bases view (core Bases plugin, 1.9+). Selects conversation notes by their
@@ -158,7 +162,7 @@ export class CarbonVoiceSync {
       voiceMemos: 0,
       artifacts: 0,
     }
-    const messages = await this.collectMessagesSince(api, since, n => {
+    const messages = await this.collectUpdatesSince(api, since, n => {
       progress.fetched = n
       onProgress?.(progress)
     })
@@ -215,7 +219,7 @@ export class CarbonVoiceSync {
     const earliest = [convSince, memoSince]
       .filter((s): s is string => s != null)
       .reduce((a, b) => (a < b ? a : b))
-    const messages = await this.collectMessagesSince(api, earliest, n => {
+    const messages = await this.collectCreatedSince(api, earliest, n => {
       progress.fetched = n
       onProgress?.(progress)
     })
@@ -270,42 +274,53 @@ export class CarbonVoiceSync {
 
   // ── Message fetching ────────────────────────────────────────────────────
 
-  // All messages updated at/after `sinceIso`, paging forward by last_updated_at.
-  private async collectMessagesSince(
-    api: CarbonVoiceAPI,
+  // Pages a v5 message feed forward (direction 'newer') from `sinceIso`, following next_cursor until
+  // the server reports has_more=false. `fetchPage` selects the feed. Per the keyset contract we never
+  // stop on a short page — only on has_more=false — and the server shifts a first `newer` page's date
+  // back 4s so just-written rows aren't missed.
+  private async collectMessagesForward(
+    fetchPage: (q: MessagesV5QueryParams) => Promise<MessagePageV5>,
     sinceIso: string,
     onFetch?: (total: number) => void
   ): Promise<CarbonVoiceMessage[]> {
     const out = new Map<string, CarbonVoiceMessage>()
-    let cursor = sinceIso
+    let cursor: string | undefined
     for (let i = 0; i < MAX_PAGES; i++) {
-      const page = await api.getRecentMessages({
-        date: cursor,
-        direction: 'newer',
-        use_last_updated: true,
-        limit: PAGE,
-      })
-      if (page.length === 0) break
-      let newest = cursor
-      for (const m of page) {
-        out.set(m.message_id, m)
-        const ts = m.last_updated_at || m.created_at
-        if (ts > newest) newest = ts
-      }
+      const page = await fetchPage(
+        cursor
+          ? { cursor, direction: 'newer', limit: MESSAGE_PAGE }
+          : { date: sinceIso, direction: 'newer', limit: MESSAGE_PAGE }
+      )
+      for (const m of page.messages) out.set(m.message_id, m)
       onFetch?.(out.size)
-      // Advance by the newest timestamp seen and keep paging. A short page (fewer than PAGE rows)
-      // is NOT end-of-data — /v3/messages/recent caps its page size below our requested limit, so
-      // stopping on a short page would drop everything past the first page (the oldest slice for a
-      // `newer` scan), which is exactly what made a larger history window return fewer memos. Stop
-      // only when a page is empty or the cursor can't move forward.
-      if (newest === cursor) break
-      cursor = newest
+      if (!page.hasMore || !page.nextCursor) break
+      cursor = page.nextCursor
     }
     return [...out.values()]
   }
 
-  // A single channel's messages within one grouping period (month / week / day), paging older
-  // from the period end.
+  // Incremental feed (GET /v5/messages/updates): everything created or changed at/after `sinceIso`,
+  // ordered by last_updated_at — so a message whose status/transcript later changes resurfaces.
+  private collectUpdatesSince(
+    api: CarbonVoiceAPI,
+    sinceIso: string,
+    onFetch?: (total: number) => void
+  ): Promise<CarbonVoiceMessage[]> {
+    return this.collectMessagesForward(q => api.getMessageUpdatesV5(q), sinceIso, onFetch)
+  }
+
+  // History feed (GET /v5/messages): everything created at/after `sinceIso`, ordered by created_at.
+  private collectCreatedSince(
+    api: CarbonVoiceAPI,
+    sinceIso: string,
+    onFetch?: (total: number) => void
+  ): Promise<CarbonVoiceMessage[]> {
+    return this.collectMessagesForward(q => api.getMessagesV5(q), sinceIso, onFetch)
+  }
+
+  // A single channel's messages within one grouping period (month / week / day), paging older from
+  // the period end via GET /v5/messages scoped to the conversation. Keyset paging stops on
+  // has_more=false; we also stop early once a page reaches past the period start.
   private async fetchChannelPeriod(
     api: CarbonVoiceAPI,
     channelGuid: string,
@@ -314,26 +329,20 @@ export class CarbonVoiceSync {
   ): Promise<CarbonVoiceMessage[]> {
     const { start, end } = periodBounds(periodKey, grouping)
     const out = new Map<string, CarbonVoiceMessage>()
-    let cursor = end
+    let cursor: string | undefined
     for (let i = 0; i < MAX_PAGES; i++) {
-      const page = await api.getRecentMessages({
-        channel_id: channelGuid,
-        date: cursor,
-        direction: 'older',
-        use_last_updated: false,
-        limit: PAGE,
-      })
-      if (page.length === 0) break
-      let oldest = cursor
-      for (const m of page) {
+      const page = await api.getMessagesV5(
+        cursor
+          ? { cursor, direction: 'older', limit: MESSAGE_PAGE, conversation_id: channelGuid }
+          : { date: end, direction: 'older', limit: MESSAGE_PAGE, conversation_id: channelGuid }
+      )
+      let pagedPastStart = false
+      for (const m of page.messages) {
         if (m.created_at >= start && m.created_at < end) out.set(m.message_id, m)
-        if (m.created_at < oldest) oldest = m.created_at
+        if (m.created_at < start) pagedPastStart = true
       }
-      // Stop once we've paged past the period start or the cursor can't move older. A short page
-      // (fewer than PAGE rows) is NOT end-of-data — the endpoint caps page size below our requested
-      // limit — so we keep paging until a real terminator trips instead of dropping older messages.
-      if (oldest < start || oldest === cursor) break
-      cursor = oldest
+      if (pagedPastStart || !page.hasMore || !page.nextCursor) break
+      cursor = page.nextCursor
     }
     return [...out.values()]
   }
