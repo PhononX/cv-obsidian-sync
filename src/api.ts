@@ -48,6 +48,28 @@ export interface ResponsesQueryParams {
   limit?: number
 }
 
+// Query for the keyset-paginated v5 message endpoints (GET /v5/messages and /v5/messages/updates).
+// First page: pass `date` + `direction`. Subsequent pages: pass `cursor` (the previous page's
+// next_cursor) + the SAME `direction`, and omit `date` — the cursor supersedes it. `limit` defaults
+// to 200 server-side.
+export interface MessagesV5QueryParams {
+  direction: MessageDirection
+  date?: string
+  cursor?: string
+  limit?: number
+  conversation_id?: string
+  language?: string
+  presigned_url?: boolean
+}
+
+// One keyset page of v5 messages. Keep paging while `hasMore` is true, re-issuing with
+// `cursor: nextCursor`; never infer end-of-results from a short `messages` array.
+export interface MessagePageV5 {
+  messages: CarbonVoiceMessage[]
+  hasMore: boolean
+  nextCursor: string | null
+}
+
 export interface WorkspaceQueryParams {
   direction?: MessageDirection
   limit?: number
@@ -159,23 +181,50 @@ export class CarbonVoiceAPI {
     return this.post<CarbonVoiceMessage[]>('/v3/messages/recent', params)
   }
 
-  // POST /v5/messages/recent — a lighter payload than v3 that also reports each message's AI
-  // responses (ai_response_ids). NOT yet wired into sync: the v5 endpoint isn't ready for public
-  // use, so getRecentMessages above stays on v3. Kept (with mapRecentV5ToMessage) so the switch is
-  // a one-line change when v5 ships. The v5 shape differs (single-valued conversation_id /
-  // workspace_id, direct transcript / ai_summary, a single audio object), so every row is
-  // normalised back into the CarbonVoiceMessage the sync engine consumes.
-  async getRecentMessagesV5(params: MessageQueryParams): Promise<CarbonVoiceMessage[]> {
-    const body = {
-      date: params.date,
-      direction: params.direction,
-      use_last_updated: params.use_last_updated,
-      ...(params.limit != null ? { limit: params.limit } : {}),
-      // v5 names the conversation filter `conversation_id` where v3 used `channel_id`.
-      ...(params.channel_id ? { conversation_id: params.channel_id } : {}),
+  // The v5 message endpoints (GET). NOT yet wired into sync — getRecentMessages above stays on v3
+  // until v5 is public — but kept current with the contract (and mapRecentV5ToMessage) so switching
+  // over is a small change. Both are keyset-paginated: caller pages with `date`+`direction`, then
+  // `cursor`+`direction` while `hasMore`. The server shifts a first `newer` page's `date` back 4s to
+  // avoid missing just-written rows; a cursor drives paging strictly with no such offset.
+
+  // GET /v5/messages — messages ordered by created_at. This is the history-import feed.
+  async getMessagesV5(params: MessagesV5QueryParams): Promise<MessagePageV5> {
+    return this.pageMessagesV5('/v5/messages', params)
+  }
+
+  // GET /v5/messages/updates — messages ordered by last_updated_at, surfacing edits / status /
+  // label changes as well as new messages. This is the ongoing-sync feed (replaces v3's
+  // use_last_updated scan).
+  async getMessageUpdatesV5(params: MessagesV5QueryParams): Promise<MessagePageV5> {
+    return this.pageMessagesV5('/v5/messages/updates', params)
+  }
+
+  // Shared query + normalisation for the two v5 message feeds — identical params and envelope, they
+  // differ only in ordering (created_at vs last_updated_at) server-side. Each row is mapped back
+  // into the CarbonVoiceMessage the sync engine consumes.
+  private async pageMessagesV5(
+    path: string,
+    params: MessagesV5QueryParams
+  ): Promise<MessagePageV5> {
+    const qs = new URLSearchParams()
+    qs.set('direction', params.direction)
+    // A cursor supersedes date; send exactly one anchor so the two never conflict.
+    if (params.cursor) qs.set('cursor', params.cursor)
+    else if (params.date) qs.set('date', params.date)
+    if (params.limit != null) qs.set('limit', String(params.limit))
+    if (params.conversation_id) qs.set('conversation_id', params.conversation_id)
+    if (params.language) qs.set('language', params.language)
+    if (params.presigned_url) qs.set('presigned_url', 'true')
+    const res = await this.get<{
+      data: CarbonVoiceMessageRecentV5[]
+      has_more: boolean
+      next_cursor: string | null
+    }>(`${path}?${qs.toString()}`)
+    return {
+      messages: (res.data ?? []).map(mapRecentV5ToMessage),
+      hasMore: Boolean(res.has_more),
+      nextCursor: res.next_cursor ?? null,
     }
-    const rows = await this.post<CarbonVoiceMessageRecentV5[]>('/v5/messages/recent', body)
-    return rows.map(mapRecentV5ToMessage)
   }
 
   // ── AI responses & prompts ────────────────────────────────────────────────
@@ -221,7 +270,8 @@ export class CarbonVoiceAPI {
   }
 }
 
-// Normalises a /v5/messages/recent row into the CarbonVoiceMessage the sync engine consumes. The
+// Normalises a v5 message row (from /v5/messages or /v5/messages/updates) into the
+// CarbonVoiceMessage the sync engine consumes. The
 // v5 payload is flatter: transcript and ai_summary are direct strings (re-expressed here as the
 // `transcript` / `summary` text models the engine reads), audio is a single object (re-expressed
 // as a one-entry audio_models list), and scope is single-valued (wrapped back into arrays). When

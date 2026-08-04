@@ -161,11 +161,12 @@ export interface CarbonVoiceMessageV5 {
   link: string
 }
 
-// Messages (v5 recent — used by POST /v5/messages/recent). A lighter, flatter shape than the v3
-// recent payload: `transcript` and `ai_summary` are direct string fields (no text_models), audio
-// lives in a single `audio` object, and — crucially — `ai_response_ids` lists the AI responses
-// generated for the message so we can pull them into notes. Scope is single-valued here
-// (`conversation_id` / `workspace_id`) where v3 used arrays.
+// A v5 message row (the MessageV5 shape returned in the `data` array of GET /v5/messages and
+// GET /v5/messages/updates). A lighter, flatter shape than the v3 payload: `transcript` and
+// `ai_summary` are direct string fields (no text_models), audio lives in a single `audio` object,
+// and — crucially — `ai_response_ids` lists the AI responses generated for the message so we can
+// pull them into notes. Scope is single-valued here (`conversation_id` / `workspace_id`) where v3
+// used arrays.
 export interface CarbonVoiceTimecodeV5 {
   t: string
   s: number
