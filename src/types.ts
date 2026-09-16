@@ -353,6 +353,10 @@ export interface CarbonVoiceSettings {
   audioMode: AudioMode
   syncOnStartup: boolean
   lastSyncTimestamp: string | null
+  // Keyset resume cursor for the incremental updates feed (GET /v5/messages/updates). Once set, each
+  // sync continues strictly from it (no overlap, no re-scan of the date look-back window); the date
+  // above only seeds the very first incremental request. Null until that first request completes.
+  updatesCursor: string | null
 
   conversationScope: SyncScope
   conversationWorkspaceIds: string[]
@@ -390,6 +394,7 @@ export const DEFAULT_SETTINGS: CarbonVoiceSettings = {
   audioMode: 'off',
   syncOnStartup: true,
   lastSyncTimestamp: null,
+  updatesCursor: null,
 
   conversationScope: 'all',
   conversationWorkspaceIds: [],

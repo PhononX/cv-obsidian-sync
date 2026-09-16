@@ -139,17 +139,20 @@ export class CarbonVoiceSync {
 
   // ── Public entry points ─────────────────────────────────────────────────
 
-  // Forward incremental sync. First run only sets the baseline (no historical pull).
+  // Forward incremental sync. First run only sets the baseline (no historical pull). After that,
+  // updates are pulled from the /v5/messages/updates keyset feed: once we have a resume cursor we
+  // continue strictly from it and never fall back to a date, so each run reads only what changed
+  // since the last one with no overlap.
   async syncIncremental(onProgress?: (p: SyncProgress) => void): Promise<SyncResult> {
     const api = new CarbonVoiceAPI(this.settings.apiToken)
     await this.ensureBaseViews()
-    // Capture the baseline before fetching: any message updated during this run then gets
-    // re-pulled next time rather than being skipped. Status changes bump last_updated_at, so
-    // a message that goes `active` (transcript ready) after we saw it will resync on its own.
     const startedAt = new Date().toISOString()
     const since = this.settings.lastSyncTimestamp
+    const savedCursor = this.settings.updatesCursor
 
-    if (since == null) {
+    // First run ever: record the baseline and pull nothing (use Historical import for back-fill).
+    // The next run date-anchors from this baseline and captures the first cursor.
+    if (since == null && savedCursor == null) {
       this.settings.lastSyncTimestamp = startedAt
       await this.plugin.saveSettings()
       return { firstRun: true, conversations: 0, voiceMemos: 0, artifacts: 0 }
@@ -162,16 +165,35 @@ export class CarbonVoiceSync {
       voiceMemos: 0,
       artifacts: 0,
     }
-    const messages = await this.collectUpdatesSince(api, since, n => {
+    const onFetch = (n: number) => {
       progress.fetched = n
       onProgress?.(progress)
-    })
+    }
+    // Resume from the stored cursor; only date-anchor when we don't have one yet (the first real
+    // incremental run). `since` is non-null here because the first-run branch above returned.
+    const dateAnchor = since ?? startedAt
+    let collected: { messages: CarbonVoiceMessage[]; nextCursor: string | null }
+    try {
+      collected = await this.collectUpdates(
+        api,
+        savedCursor ? { cursor: savedCursor } : { date: dateAnchor },
+        onFetch
+      )
+    } catch (err) {
+      if (!savedCursor) throw err
+      // A stored cursor the server rejects (stale/invalid) would otherwise wedge every future sync —
+      // self-heal by dropping it and re-anchoring on the last-synced date.
+      console.warn('Carbon Voice: updates cursor rejected; re-anchoring by date', err)
+      this.settings.updatesCursor = null
+      collected = await this.collectUpdates(api, { date: dateAnchor }, onFetch)
+    }
+    const messages = collected.messages
     progress.phase = 'writing'
     const memos = messages.filter(m => this.isVoiceMemo(m) && this.memoInScope(m))
     const convMsgs = await this.selectConversationMessages(api, messages)
 
     const ai = await this.buildAiContext(api)
-    const artifacts = await this.syncResponses(api, since, ai, n => {
+    const artifacts = await this.syncResponses(api, dateAnchor, ai, n => {
       progress.artifacts = n
       onProgress?.(progress)
     })
@@ -184,6 +206,9 @@ export class CarbonVoiceSync {
       onProgress?.(progress)
     })
 
+    // Persist the resume cursor so the next run continues strictly from here. Keep the timestamp
+    // too — as the "last synced" display and the date seed if the cursor ever has to be rebuilt.
+    if (collected.nextCursor) this.settings.updatesCursor = collected.nextCursor
     this.settings.lastSyncTimestamp = startedAt
     await this.plugin.saveSettings()
     return { firstRun: false, conversations, voiceMemos, artifacts }
@@ -274,48 +299,61 @@ export class CarbonVoiceSync {
 
   // ── Message fetching ────────────────────────────────────────────────────
 
-  // Pages a v5 message feed forward (direction 'newer') from `sinceIso`, following next_cursor until
-  // the server reports has_more=false. `fetchPage` selects the feed. Per the keyset contract we never
-  // stop on a short page — only on has_more=false — and the server shifts a first `newer` page's date
-  // back 4s so just-written rows aren't missed.
+  // Pages a v5 message feed forward (direction 'newer') from an anchor — either a `cursor` (resume
+  // strictly, no overlap) or a `date` (first request only; the server look-back applies). Follows
+  // next_cursor until has_more=false, and returns the last cursor seen so the caller can persist it
+  // as the resume point. Per the keyset contract we never stop on a short page — only on
+  // has_more=false.
   private async collectMessagesForward(
     fetchPage: (q: MessagesV5QueryParams) => Promise<MessagePageV5>,
-    sinceIso: string,
+    anchor: { date?: string; cursor?: string },
     onFetch?: (total: number) => void
-  ): Promise<CarbonVoiceMessage[]> {
+  ): Promise<{ messages: CarbonVoiceMessage[]; nextCursor: string | null }> {
     const out = new Map<string, CarbonVoiceMessage>()
-    let cursor: string | undefined
+    let cursor = anchor.cursor
+    let date = anchor.cursor ? undefined : anchor.date
+    // Seed the resume point with the incoming cursor so an empty response (nothing new) keeps it.
+    let tail: string | null = anchor.cursor ?? null
     for (let i = 0; i < MAX_PAGES; i++) {
       const page = await fetchPage(
         cursor
           ? { cursor, direction: 'newer', limit: MESSAGE_PAGE }
-          : { date: sinceIso, direction: 'newer', limit: MESSAGE_PAGE }
+          : { date, direction: 'newer', limit: MESSAGE_PAGE }
       )
       for (const m of page.messages) out.set(m.message_id, m)
       onFetch?.(out.size)
+      if (page.nextCursor) tail = page.nextCursor
       if (!page.hasMore || !page.nextCursor) break
       cursor = page.nextCursor
+      date = undefined
     }
-    return [...out.values()]
+    return { messages: [...out.values()], nextCursor: tail }
   }
 
-  // Incremental feed (GET /v5/messages/updates): everything created or changed at/after `sinceIso`,
+  // Incremental feed (GET /v5/messages/updates): everything created or changed since the anchor,
   // ordered by last_updated_at — so a message whose status/transcript later changes resurfaces.
-  private collectUpdatesSince(
+  // Returns the tail cursor to persist for the next run.
+  private collectUpdates(
     api: CarbonVoiceAPI,
-    sinceIso: string,
+    anchor: { date?: string; cursor?: string },
     onFetch?: (total: number) => void
-  ): Promise<CarbonVoiceMessage[]> {
-    return this.collectMessagesForward(q => api.getMessageUpdatesV5(q), sinceIso, onFetch)
+  ): Promise<{ messages: CarbonVoiceMessage[]; nextCursor: string | null }> {
+    return this.collectMessagesForward(q => api.getMessageUpdatesV5(q), anchor, onFetch)
   }
 
   // History feed (GET /v5/messages): everything created at/after `sinceIso`, ordered by created_at.
-  private collectCreatedSince(
+  // A one-shot windowed pull — no cursor is persisted.
+  private async collectCreatedSince(
     api: CarbonVoiceAPI,
     sinceIso: string,
     onFetch?: (total: number) => void
   ): Promise<CarbonVoiceMessage[]> {
-    return this.collectMessagesForward(q => api.getMessagesV5(q), sinceIso, onFetch)
+    const { messages } = await this.collectMessagesForward(
+      q => api.getMessagesV5(q),
+      { date: sinceIso },
+      onFetch
+    )
+    return messages
   }
 
   // A single channel's messages within one grouping period (month / week / day), paging older from
