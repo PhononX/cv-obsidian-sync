@@ -3,7 +3,7 @@ import type {
   CarbonVoiceUser,
   CarbonVoiceMessage,
   CarbonVoiceMessageV5,
-  CarbonVoiceMessageRecentV5,
+  CarbonVoiceMessageV6,
   CarbonVoiceAiResponse,
   CarbonVoicePrompt,
   CarbonVoiceAudioModel,
@@ -48,11 +48,11 @@ export interface ResponsesQueryParams {
   limit?: number
 }
 
-// Query for the keyset-paginated v5 message endpoints (GET /v5/messages and /v5/messages/updates).
+// Query for the keyset-paginated v6 message endpoints (GET /v6/messages and /v6/messages/updates).
 // First page: pass `date` + `direction`. Subsequent pages: pass `cursor` (the previous page's
 // next_cursor) + the SAME `direction`, and omit `date` — the cursor supersedes it. `limit` defaults
-// to 200 server-side.
-export interface MessagesV5QueryParams {
+// to, and is capped at, 200 server-side.
+export interface MessagesV6QueryParams {
   direction: MessageDirection
   date?: string
   cursor?: string
@@ -62,9 +62,11 @@ export interface MessagesV5QueryParams {
   presigned_url?: boolean
 }
 
-// One keyset page of v5 messages. Keep paging while `hasMore` is true, re-issuing with
-// `cursor: nextCursor`; never infer end-of-results from a short `messages` array.
-export interface MessagePageV5 {
+// One keyset page of v6 messages. Keep paging while `hasMore` is true, re-issuing with
+// `cursor: nextCursor`; never infer end-of-results from a short `messages` array. With
+// direction=newer the final page still carries `nextCursor` (the newest message seen), which is
+// what incremental sync stores to resume from; it is null only on an empty date-anchored page.
+export interface MessagePageV6 {
   messages: CarbonVoiceMessage[]
   hasMore: boolean
   nextCursor: string | null
@@ -175,36 +177,38 @@ export class CarbonVoiceAPI {
 
   // ── Messages ──────────────────────────────────────────────────────────────
 
-  // POST /v3/messages/recent — the previous message feed. Sync now uses the v5 endpoints below;
+  // POST /v3/messages/recent — the previous message feed. Sync now uses the v6 endpoints below;
   // this is kept as a fallback for easy rollback and is currently unused.
   async getRecentMessages(params: MessageQueryParams): Promise<CarbonVoiceMessage[]> {
     return this.post<CarbonVoiceMessage[]>('/v3/messages/recent', params)
   }
 
-  // The v5 message endpoints (GET) — the live feeds sync now uses. Both are keyset-paginated: the
+  // The v6 message endpoints (GET) — the live feeds sync uses. Both are keyset-paginated: the
   // caller pages with `date`+`direction`, then `cursor`+`direction` while `hasMore`. The server
-  // shifts a first `newer` page's `date` back 4s to avoid missing just-written rows; a cursor drives
-  // paging strictly with no such offset. Each row is normalised via mapRecentV5ToMessage.
+  // shifts a first `newer` page's `date` back 4s to avoid missing just-written rows. A stored
+  // resume cursor may also re-deliver up to 4s of already-seen messages, so callers de-duplicate
+  // by id. Each row is normalised via mapMessageV6.
 
-  // GET /v5/messages — messages ordered by created_at. This is the history-import feed.
-  async getMessagesV5(params: MessagesV5QueryParams): Promise<MessagePageV5> {
-    return this.pageMessagesV5('/v5/messages', params)
+  // GET /v6/messages — messages ordered by created_at. This is the history-import feed.
+  async getMessagesV6(params: MessagesV6QueryParams): Promise<MessagePageV6> {
+    return this.pageMessagesV6('/v6/messages', params)
   }
 
-  // GET /v5/messages/updates — messages ordered by last_updated_at, surfacing edits / status /
-  // label changes as well as new messages. This is the ongoing-sync feed (replaces v3's
-  // use_last_updated scan).
-  async getMessageUpdatesV5(params: MessagesV5QueryParams): Promise<MessagePageV5> {
-    return this.pageMessagesV5('/v5/messages/updates', params)
+  // GET /v6/messages/updates — messages ordered by last_updated_at, surfacing edits / status /
+  // label changes as well as new messages. This is the incremental-sync feed. We leave
+  // include_unchanged_content at its default (true): notes are rebuilt from the full message, so
+  // every row must carry its content.
+  async getMessageUpdatesV6(params: MessagesV6QueryParams): Promise<MessagePageV6> {
+    return this.pageMessagesV6('/v6/messages/updates', params)
   }
 
-  // Shared query + normalisation for the two v5 message feeds — identical params and envelope, they
+  // Shared query + normalisation for the two v6 message feeds — identical params and envelope, they
   // differ only in ordering (created_at vs last_updated_at) server-side. Each row is mapped back
   // into the CarbonVoiceMessage the sync engine consumes.
-  private async pageMessagesV5(
+  private async pageMessagesV6(
     path: string,
-    params: MessagesV5QueryParams
-  ): Promise<MessagePageV5> {
+    params: MessagesV6QueryParams
+  ): Promise<MessagePageV6> {
     const qs = new URLSearchParams()
     qs.set('direction', params.direction)
     // A cursor supersedes date; send exactly one anchor so the two never conflict.
@@ -215,12 +219,12 @@ export class CarbonVoiceAPI {
     if (params.language) qs.set('language', params.language)
     if (params.presigned_url) qs.set('presigned_url', 'true')
     const res = await this.get<{
-      data: CarbonVoiceMessageRecentV5[]
+      data: CarbonVoiceMessageV6[]
       has_more: boolean
       next_cursor: string | null
     }>(`${path}?${qs.toString()}`)
     return {
-      messages: (res.data ?? []).map(mapRecentV5ToMessage),
+      messages: (res.data ?? []).map(mapMessageV6),
       hasMore: Boolean(res.has_more),
       nextCursor: res.next_cursor ?? null,
     }
@@ -269,21 +273,22 @@ export class CarbonVoiceAPI {
   }
 }
 
-// Normalises a v5 message row (from /v5/messages or /v5/messages/updates) into the
-// CarbonVoiceMessage the sync engine consumes. The
-// v5 payload is flatter: transcript and ai_summary are direct strings (re-expressed here as the
-// `transcript` / `summary` text models the engine reads), audio is a single object (re-expressed
-// as a one-entry audio_models list), and scope is single-valued (wrapped back into arrays). When
-// the payload omits `name` (not in the documented recent shape) a memo's title falls back to its
-// summary/transcript. The message's `ai_response_ids` are preserved for AI-response sync.
-function mapRecentV5ToMessage(r: CarbonVoiceMessageRecentV5): CarbonVoiceMessage {
-  const language = r.language ?? ''
+// Normalises a v6 message row (from /v6/messages or /v6/messages/updates) into the
+// CarbonVoiceMessage the sync engine consumes. In v6 the transcript, AI summary, time codes,
+// language and audio all live under `content` (omitted when the message has neither audio nor
+// text). They're re-expressed here as the `transcript` / `summary` text models and a one-entry
+// audio_models list the engine reads. Scope is single-valued (wrapped back into arrays), and
+// `thread_id` stands in for parent_message_id. v6 has no `name`, so a voice memo's title falls
+// back to its summary/transcript. The message's `ai_response_ids` are kept for AI-artifact sync.
+function mapMessageV6(r: CarbonVoiceMessageV6): CarbonVoiceMessage {
+  const c = r.content ?? {}
+  const language = c.language ?? ''
 
-  // Prefer the direct transcript string; fall back to joining the per-word time codes (audio
-  // messages can carry the words there with an empty top-level transcript), matching v3 handling.
+  // Prefer the transcript string; fall back to joining the per-word time codes (audio messages can
+  // carry the words there with an empty transcript), matching v3 handling.
   const transcript =
-    r.transcript?.trim() ||
-    (r.time_codes ?? [])
+    c.transcript?.trim() ||
+    (c.time_codes ?? [])
       .map(tc => tc.t)
       .join(' ')
       .replace(/\s+/g, ' ')
@@ -293,12 +298,12 @@ function mapRecentV5ToMessage(r: CarbonVoiceMessageRecentV5): CarbonVoiceMessage
   if (transcript) {
     textModels.push({ type: 'transcript', audio_id: null, language_id: language, value: transcript })
   }
-  if (r.ai_summary && r.ai_summary.trim()) {
-    textModels.push({ type: 'summary', audio_id: null, language_id: language, value: r.ai_summary })
+  if (c.ai_summary && c.ai_summary.trim()) {
+    textModels.push({ type: 'summary', audio_id: null, language_id: language, value: c.ai_summary })
   }
 
   const audioModels: CarbonVoiceAudioModel[] = []
-  const audioUrl = r.audio?.presigned_url || r.audio?.url || r.audio?.streaming_url || ''
+  const audioUrl = c.presigned_url || c.url || c.streaming_url || ''
   if (audioUrl) {
     audioModels.push({
       _id: r.id,
@@ -306,8 +311,9 @@ function mapRecentV5ToMessage(r: CarbonVoiceMessageRecentV5): CarbonVoiceMessage
       extension: null,
       streaming: false,
       language,
-      duration_ms: r.audio?.duration_ms ?? 0,
-      waveform_percentages: r.audio?.waveform_percentages ?? [],
+      duration_ms: c.duration_ms ?? 0,
+      // v6 sends the waveform as a compact base-36 string; the plugin never renders it.
+      waveform_percentages: [],
       is_original_audio: true,
     })
   }
@@ -327,23 +333,25 @@ function mapRecentV5ToMessage(r: CarbonVoiceMessageRecentV5): CarbonVoiceMessage
     message_id: r.id,
     creator_id: r.creator_id,
     created_at: r.created_at,
-    deleted_at: r.deleted_at,
+    deleted_at: r.deleted_at ?? null,
     last_updated_at: r.updated_at || r.created_at,
     workspace_ids: r.workspace_id ? [r.workspace_id] : [],
     channel_ids: r.conversation_id ? [r.conversation_id] : [],
-    parent_message_id: r.parent_message_id,
-    name: r.name ?? null,
+    // A message is a reply exactly when its thread differs from its own id.
+    parent_message_id: r.thread_id && r.thread_id !== r.id ? r.thread_id : null,
+    name: null,
     // Only an `audio` kind is an audio message; everything else (text, ai-*, action items…) is
-    // rendered as text so it never shows a phantom duration or audio player.
-    is_text_message: r.kind !== 'audio',
+    // rendered as text so it never shows a phantom duration or audio player. `kind` is optional in
+    // v6, so when it's missing, fall back to whether the message actually has audio.
+    is_text_message: r.kind ? r.kind !== 'audio' : !audioUrl,
     status: r.status,
     type: r.type,
-    folder_id: r.folder_id,
-    duration_ms: r.audio?.duration_ms ?? 0,
+    folder_id: r.folder_id ?? null,
+    duration_ms: c.duration_ms ?? 0,
     audio_models: audioModels,
     text_models: textModels,
     attachments,
-    notes: '',
+    notes: r.notes ?? '',
     ai_response_ids: r.ai_response_ids ?? [],
   }
 }

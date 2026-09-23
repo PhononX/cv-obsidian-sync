@@ -109,9 +109,9 @@ export interface CarbonVoiceMessage {
   text_models: CarbonVoiceTextModel[]
   attachments: CarbonVoiceAttachment[]
   notes: string
-  // AI responses attached to this message. Only the v5 recent payload carries these; the v3
-  // endpoint (currently in use) omits them, so message → artifact links are built from the
-  // /responses feed's message_ids instead. Present again once sync moves back to v5.
+  // AI responses attached to this message. The v6 payload carries these; the v3 endpoint omits
+  // them, which is why message → artifact links are also built from the /responses feed's
+  // message_ids.
   ai_response_ids?: CarbonVoiceAiResponseRef[]
 }
 
@@ -161,46 +161,53 @@ export interface CarbonVoiceMessageV5 {
   link: string
 }
 
-// A v5 message row (the MessageV5 shape returned in the `data` array of GET /v5/messages and
-// GET /v5/messages/updates). A lighter, flatter shape than the v3 payload: `transcript` and
-// `ai_summary` are direct string fields (no text_models), audio lives in a single `audio` object,
-// and — crucially — `ai_response_ids` lists the AI responses generated for the message so we can
-// pull them into notes. Scope is single-valued here (`conversation_id` / `workspace_id`) where v3
-// used arrays.
 export interface CarbonVoiceTimecodeV5 {
   t: string
   s: number
   e: number
 }
 
-export interface CarbonVoiceMessageRecentV5 {
+// One language's rendition of a v6 message: the audio plus the text derived from it. Replaces the
+// v5 top-level audio / language / transcript / ai_summary / time_codes fields. The server strips
+// null fields, so everything is optional.
+export interface CarbonVoiceMessageContentV6 {
+  ai_summary?: string | null
+  transcript?: string | null
+  time_codes?: CarbonVoiceTimecodeV5[]
+  is_original_language?: boolean | null
+  language?: string | null
+  url?: string | null
+  streaming_url?: string | null
+  // Only present when the request sets presigned_url=true.
+  presigned_url?: string | null
+  duration_ms?: number | null
+  // Base-36 string, one char per bar (decode with parseInt(ch, 36) / 35). Unused by the plugin.
+  waveform_percentage?: string | null
+}
+
+// A v6 message row: the MessageV6 items in `data` from GET /v6/messages (created_at order) and
+// GET /v6/messages/updates (last_updated_at order). Scope is single-valued (conversation_id /
+// workspace_id) where v3 used arrays. Content lives under `content`, which is omitted when the
+// message has neither audio nor text. `thread_id` replaces v5's parent_message_id: a message is a
+// reply exactly when thread_id !== id. There is no `name` field.
+export interface CarbonVoiceMessageV6 {
   id: string
-  type: MessageType | null
-  kind: MessageKind | null
+  type: MessageType
+  kind?: MessageKind | null
   created_at: string
   updated_at: string
-  deleted_at: string | null
-  conversation_id: string | null
-  workspace_id: string | null
+  deleted_at?: string | null
+  conversation_id?: string | null
+  workspace_id: string
   creator_id: string
-  status: string | null
-  parent_message_id: string | null
-  folder_id: string | null
-  // Not shown in the documented recent shape, but mapped through when the live payload carries it
-  // so named memos keep their title.
-  name?: string | null
-  language: string | null
-  available_languages: string[]
-  is_original_language: boolean
-  transcript: string | null
-  ai_summary: string | null
-  ai_response_ids: CarbonVoiceAiResponseRef[]
-  time_codes: CarbonVoiceTimecodeV5[]
-  audio: CarbonVoiceAudioInfo | null
-  attachments: CarbonVoiceAttachmentV5[]
-  conversation_sequence: number | null
-  source_message_id: string | null
-  link: string | null
+  status: string
+  thread_id: string
+  folder_id?: string | null
+  attachments?: CarbonVoiceAttachmentV5[]
+  ai_response_ids?: CarbonVoiceAiResponseRef[]
+  content?: CarbonVoiceMessageContentV6
+  notes?: string | null
+  link: string
 }
 
 // AI responses (GET /responses/{id}). A response holds one variant per language; each variant
@@ -353,9 +360,9 @@ export interface CarbonVoiceSettings {
   audioMode: AudioMode
   syncOnStartup: boolean
   lastSyncTimestamp: string | null
-  // Keyset resume cursor for the incremental updates feed (GET /v5/messages/updates). Once set, each
-  // sync continues strictly from it (no overlap, no re-scan of the date look-back window); the date
-  // above only seeds the very first incremental request. Null until that first request completes.
+  // Keyset resume cursor for the incremental updates feed (GET /v6/messages/updates; v5 and v6 share
+  // the cursor format, so one stored from v5 carries over). Once set, each sync continues from it;
+  // the date above only seeds the very first incremental request. Null until a request returns one.
   updatesCursor: string | null
 
   conversationScope: SyncScope

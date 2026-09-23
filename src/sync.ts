@@ -1,7 +1,7 @@
 import { TFile, TFolder, normalizePath } from 'obsidian'
 import type CarbonVoiceSyncPlugin from './main'
 import { CarbonVoiceAPI } from './api'
-import type { MessagePageV5, MessagesV5QueryParams } from './api'
+import type { MessagePageV6, MessagesV6QueryParams } from './api'
 import type {
   CarbonVoiceMessage,
   CarbonVoiceChannel,
@@ -26,8 +26,8 @@ interface RenderedAiResponse {
 // to its written artifact (or null when it produced no note / failed) so message linking is a
 // lookup and each response is written at most once — whether reached via the /responses feed or an
 // individual fallback fetch. `byMessage` maps a source message id to the response ids attributed to
-// it (from each response's message_ids) — this is how a message finds its artifacts without relying
-// on the v5 message payload's ai_response_ids, so linking works on the v3 endpoint. `claimedArtifacts`
+// it (from each response's message_ids) — so a message finds its artifacts even when its own payload
+// lacks ai_response_ids (as on the v3 fallback endpoint). `claimedArtifacts`
 // tracks which response owns each artifact note path this run so two responses that share a
 // date + type + prompt + workspace don't overwrite each other.
 interface AiContext {
@@ -57,7 +57,7 @@ export interface SyncProgress {
 }
 
 const PAGE = 50
-// v5 message feeds are keyset-paginated and reliable at their default page size, so we request the
+// v6 message feeds are keyset-paginated and reliable at their default page size, so we request the
 // larger page to cut round-trips (the /responses feed keeps the smaller PAGE).
 const MESSAGE_PAGE = 200
 const MAX_PAGES = 500 // safety cap on pagination loops
@@ -140,9 +140,10 @@ export class CarbonVoiceSync {
   // ── Public entry points ─────────────────────────────────────────────────
 
   // Forward incremental sync. First run only sets the baseline (no historical pull). After that,
-  // updates are pulled from the /v5/messages/updates keyset feed: once we have a resume cursor we
-  // continue strictly from it and never fall back to a date, so each run reads only what changed
-  // since the last one with no overlap.
+  // updates are pulled from the /v6/messages/updates keyset feed: the first request is anchored by
+  // date, and every run after resumes from the cursor it stored, never falling back to a date. So
+  // each run reads only what changed since the last one (plus, while that boundary is recent, up to
+  // 4s of re-delivered messages, which are de-duplicated by id and rewrite the same notes).
   async syncIncremental(onProgress?: (p: SyncProgress) => void): Promise<SyncResult> {
     const api = new CarbonVoiceAPI(this.settings.apiToken)
     await this.ensureBaseViews()
@@ -299,13 +300,15 @@ export class CarbonVoiceSync {
 
   // ── Message fetching ────────────────────────────────────────────────────
 
-  // Pages a v5 message feed forward (direction 'newer') from an anchor — either a `cursor` (resume
-  // strictly, no overlap) or a `date` (first request only; the server look-back applies). Follows
-  // next_cursor until has_more=false, and returns the last cursor seen so the caller can persist it
-  // as the resume point. Per the keyset contract we never stop on a short page — only on
-  // has_more=false.
+  // Pages a v6 message feed forward (direction 'newer') from an anchor — either a stored `cursor`
+  // (resume) or a `date` (first request only; the server look-back applies). Follows next_cursor
+  // until has_more=false, and returns the last cursor seen so the caller can persist it as the resume
+  // point. An empty page reached via a cursor echoes that cursor back; an empty date-anchored first
+  // page returns null, so the next run anchors by date again. Rows are keyed by id, which also
+  // absorbs the up-to-4s re-delivery a recent resume cursor can produce. Per the keyset contract we
+  // never stop on a short page — only on has_more=false.
   private async collectMessagesForward(
-    fetchPage: (q: MessagesV5QueryParams) => Promise<MessagePageV5>,
+    fetchPage: (q: MessagesV6QueryParams) => Promise<MessagePageV6>,
     anchor: { date?: string; cursor?: string },
     onFetch?: (total: number) => void
   ): Promise<{ messages: CarbonVoiceMessage[]; nextCursor: string | null }> {
@@ -330,7 +333,7 @@ export class CarbonVoiceSync {
     return { messages: [...out.values()], nextCursor: tail }
   }
 
-  // Incremental feed (GET /v5/messages/updates): everything created or changed since the anchor,
+  // Incremental feed (GET /v6/messages/updates): everything created or changed since the anchor,
   // ordered by last_updated_at — so a message whose status/transcript later changes resurfaces.
   // Returns the tail cursor to persist for the next run.
   private collectUpdates(
@@ -338,10 +341,10 @@ export class CarbonVoiceSync {
     anchor: { date?: string; cursor?: string },
     onFetch?: (total: number) => void
   ): Promise<{ messages: CarbonVoiceMessage[]; nextCursor: string | null }> {
-    return this.collectMessagesForward(q => api.getMessageUpdatesV5(q), anchor, onFetch)
+    return this.collectMessagesForward(q => api.getMessageUpdatesV6(q), anchor, onFetch)
   }
 
-  // History feed (GET /v5/messages): everything created at/after `sinceIso`, ordered by created_at.
+  // History feed (GET /v6/messages): everything created at/after `sinceIso`, ordered by created_at.
   // A one-shot windowed pull — no cursor is persisted.
   private async collectCreatedSince(
     api: CarbonVoiceAPI,
@@ -349,7 +352,7 @@ export class CarbonVoiceSync {
     onFetch?: (total: number) => void
   ): Promise<CarbonVoiceMessage[]> {
     const { messages } = await this.collectMessagesForward(
-      q => api.getMessagesV5(q),
+      q => api.getMessagesV6(q),
       { date: sinceIso },
       onFetch
     )
@@ -357,7 +360,7 @@ export class CarbonVoiceSync {
   }
 
   // A single channel's messages within one grouping period (month / week / day), paging older from
-  // the period end via GET /v5/messages scoped to the conversation. Keyset paging stops on
+  // the period end via GET /v6/messages scoped to the conversation. Keyset paging stops on
   // has_more=false; we also stop early once a page reaches past the period start.
   private async fetchChannelPeriod(
     api: CarbonVoiceAPI,
@@ -369,7 +372,7 @@ export class CarbonVoiceSync {
     const out = new Map<string, CarbonVoiceMessage>()
     let cursor: string | undefined
     for (let i = 0; i < MAX_PAGES; i++) {
-      const page = await api.getMessagesV5(
+      const page = await api.getMessagesV6(
         cursor
           ? { cursor, direction: 'older', limit: MESSAGE_PAGE, conversation_id: channelGuid }
           : { date: end, direction: 'older', limit: MESSAGE_PAGE, conversation_id: channelGuid }
@@ -1049,7 +1052,7 @@ export class CarbonVoiceSync {
     await this.upsertFile(`${linkTarget}.md`, this.buildArtifactNote(resp, promptName, wsName, body))
     ai.index.set(resp.id, { promptName, linkTarget })
     // Attribute this response to each of its source messages so those messages can link to it
-    // without the v5 payload's ai_response_ids.
+    // even when their payload carries no ai_response_ids.
     for (const mid of resp.message_ids ?? []) {
       const set = ai.byMessage.get(mid) ?? new Set<string>()
       set.add(resp.id)
