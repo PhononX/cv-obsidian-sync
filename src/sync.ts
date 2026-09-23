@@ -65,6 +65,16 @@ export interface SyncProgress {
 const PAGE = 50
 // Top-level folder (under the sync root) holding one note per AI response.
 const ARTIFACTS_DIR = 'AI artifacts'
+// The "Bulleted Summary" prompt, which the server auto-runs on nearly every new message (id is
+// hard-coded in cv-api's message.service.ts). On conversation messages it would flood AI artifacts,
+// so it's skipped there; on voice memos it's kept.
+const BULLETED_SUMMARY_PROMPT_ID = '66859b7f6928970bb4f1c24a'
+
+// Whether an AI response is left out of AI artifacts: a Bulleted Summary on a conversation message
+// (one with a channel). `channelId` is the response's channel, or the message's for a reference.
+function isExcludedArtifact(promptId: string | null | undefined, channelId: string | null | undefined): boolean {
+  return promptId === BULLETED_SUMMARY_PROMPT_ID && !!channelId
+}
 // v6 message feeds are keyset-paginated and reliable at their default page size, so we request the
 // larger page to cut round-trips (the /responses feed keeps the smaller PAGE).
 const MESSAGE_PAGE = 200
@@ -1111,6 +1121,9 @@ export class CarbonVoiceSync {
     if (!this.settings.includeAiResponses) return []
     const ids = new Set<string>(ai.byMessage.get(m.message_id) ?? [])
     for (const ref of m.ai_response_ids ?? []) {
+      // Checked on the reference so an excluded response is never fetched — nearly every
+      // conversation message carries a Bulleted Summary.
+      if (isExcludedArtifact(ref.prompt_id, m.channel_ids[0])) continue
       ids.add(ref.id)
       if (ai.index.has(ref.id)) continue
       const existing = ai.existingArtifacts.get(ref.id)
@@ -1140,7 +1153,7 @@ export class CarbonVoiceSync {
   // browsable by workspace and prompt; a short response-id tag is appended only when a *different*
   // response would otherwise collide (see resolveArtifactNotePath).
   private async writeArtifact(resp: CarbonVoiceAiResponse, ai: AiContext): Promise<boolean> {
-    const body = renderAiResponseBody(resp)
+    const body = isExcludedArtifact(resp.prompt_id, resp.channel_id) ? null : renderAiResponseBody(resp)
     if (!body) {
       ai.index.set(resp.id, null)
       return false
