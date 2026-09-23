@@ -2,7 +2,6 @@ import { requestUrl } from 'obsidian'
 import type {
   CarbonVoiceUser,
   CarbonVoiceMessage,
-  CarbonVoiceMessageV5,
   CarbonVoiceMessageV6,
   CarbonVoiceAiResponse,
   CarbonVoicePrompt,
@@ -261,14 +260,16 @@ export class CarbonVoiceAPI {
     return res.arrayBuffer
   }
 
-  // V5 has transcript and ai_summary as direct fields — prefer this for sync.
-  async getMessage(id: string, options: GetMessageOptions = {}): Promise<CarbonVoiceMessageV5> {
+  // GET /v6/messages/{id} — one message in the v6 shape. `fresh` bypasses the server's message
+  // cache; `presigned_url` adds a freshly signed S3 link at `content.presigned_url`, which is how
+  // sync recovers audio whose earlier URL has expired.
+  async getMessage(id: string, options: GetMessageOptions = {}): Promise<CarbonVoiceMessageV6> {
     const params = new URLSearchParams()
     if (options.language) params.set('language', options.language)
     if (options.presigned_url) params.set('presigned_url', 'true')
     if (options.fresh) params.set('fresh', 'true')
     const qs = params.toString() ? `?${params.toString()}` : ''
-    const data = await this.get<{ message: CarbonVoiceMessageV5 }>(`/v5/messages/${id}${qs}`)
+    const data = await this.get<{ message: CarbonVoiceMessageV6 }>(`/v6/messages/${id}${qs}`)
     return data.message
   }
 }

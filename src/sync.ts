@@ -1409,7 +1409,7 @@ export class CarbonVoiceSync {
   }
 
   // Tries the audio URL already in the message payload first; if that fails (e.g. its presigned
-  // URL has expired), fetches a fresh presigned URL via the v5 message endpoint.
+  // URL has expired), fetches a fresh presigned URL via the v6 get-by-id endpoint.
   private async fetchAudioBuffer(
     api: CarbonVoiceAPI,
     m: CarbonVoiceMessage
@@ -1423,8 +1423,8 @@ export class CarbonVoiceSync {
       }
     }
     try {
-      const v5 = await api.getMessage(m.message_id, { presigned_url: true, fresh: true })
-      const url = v5.audio?.presigned_url ?? v5.audio?.url ?? null
+      const fresh = await api.getMessage(m.message_id, { presigned_url: true, fresh: true })
+      const url = fresh.content?.presigned_url ?? fresh.content?.url ?? null
       if (url) return await api.downloadBinary(url)
     } catch {
       // Give up quietly; the note still links out to Carbon Voice.

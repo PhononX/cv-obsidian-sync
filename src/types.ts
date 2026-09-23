@@ -115,16 +115,8 @@ export interface CarbonVoiceMessage {
   ai_response_ids?: CarbonVoiceAiResponseRef[]
 }
 
-// Messages (v5 — used by /v5/messages/{id}, richer shape)
-
-export interface CarbonVoiceAudioInfo {
-  url: string | null
-  streaming_url: string | null
-  duration_ms: number | null
-  waveform_percentages: number[]
-  presigned_url: string | null
-  presigned_url_expiration_date: string | null
-}
+// Messages (v6 — GET /v6/messages, /v6/messages/updates and /v6/messages/{id}). The attachment
+// and time-code shapes are unchanged from v5, hence their names.
 
 export interface CarbonVoiceAttachmentV5 {
   id: string
@@ -137,28 +129,6 @@ export interface CarbonVoiceAttachmentV5 {
   length_in_bytes: number | null
   presigned_url: string | null
   presigned_url_expiration_date: string | null
-}
-
-export interface CarbonVoiceMessageV5 {
-  id: string
-  type: MessageType
-  kind: MessageKind
-  created_at: string
-  updated_at: string
-  deleted_at: string | null
-  conversation_id: string
-  workspace_id: string
-  creator_id: string
-  status: string
-  parent_message_id: string | null
-  folder_id: string | null
-  transcript: string | null
-  ai_summary: string | null
-  audio: CarbonVoiceAudioInfo | null
-  attachments: CarbonVoiceAttachmentV5[]
-  conversation_sequence: number | null
-  source_message_id: string | null
-  link: string
 }
 
 export interface CarbonVoiceTimecodeV5 {
