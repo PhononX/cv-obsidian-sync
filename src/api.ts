@@ -20,12 +20,16 @@ import type {
 
 const BASE_URL = 'https://api.carbonvoice.app'
 
-export interface MessageQueryParams {
-  date: string
-  direction: MessageDirection
-  use_last_updated: boolean
-  channel_id?: string
-  limit?: number
+// A non-2xx response from the Carbon Voice API. Carries the HTTP status so callers can tell a
+// request the server rejected (e.g. 400 "Invalid cursor") from a transient or network failure.
+export class CarbonVoiceApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message)
+    this.name = 'CarbonVoiceApiError'
+  }
 }
 
 export interface RecentChannelsFilter {
@@ -116,10 +120,10 @@ export class CarbonVoiceAPI {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       throw: false,
     })
-    if (res.status === 401) throw new Error(`Invalid API token (${method} ${path})`)
+    if (res.status === 401) throw new CarbonVoiceApiError(`Invalid API token (${method} ${path})`, 401)
     if (res.status < 200 || res.status >= 300) {
       console.error(`Carbon Voice API error ${res.status} on ${method} ${path}`, res.text)
-      throw new Error(`API error ${res.status} on ${method} ${path}`)
+      throw new CarbonVoiceApiError(`API error ${res.status} on ${method} ${path}`, res.status)
     }
     return res.json as T
   }
@@ -175,12 +179,6 @@ export class CarbonVoiceAPI {
   }
 
   // ── Messages ──────────────────────────────────────────────────────────────
-
-  // POST /v3/messages/recent — the previous message feed. Sync now uses the v6 endpoints below;
-  // this is kept as a fallback for easy rollback and is currently unused.
-  async getRecentMessages(params: MessageQueryParams): Promise<CarbonVoiceMessage[]> {
-    return this.post<CarbonVoiceMessage[]>('/v3/messages/recent', params)
-  }
 
   // The v6 message endpoints (GET) — the live feeds sync uses. Both are keyset-paginated: the
   // caller pages with `date`+`direction`, then `cursor`+`direction` while `hasMore`. The server
@@ -279,8 +277,8 @@ export class CarbonVoiceAPI {
 // language and audio all live under `content` (omitted when the message has neither audio nor
 // text). They're re-expressed here as the `transcript` / `summary` text models and a one-entry
 // audio_models list the engine reads. Scope is single-valued (wrapped back into arrays), and
-// `thread_id` stands in for parent_message_id. v6 has no `name`, so a voice memo's title falls
-// back to its summary/transcript. The message's `ai_response_ids` are kept for AI-artifact sync.
+// `thread_id` stands in for parent_message_id. v6 doesn't send the memo `name` today, so a voice
+// memo's title falls back to its summary/transcript. `ai_response_ids` are kept for AI artifacts.
 function mapMessageV6(r: CarbonVoiceMessageV6): CarbonVoiceMessage {
   const c = r.content ?? {}
   const language = c.language ?? ''
@@ -303,8 +301,10 @@ function mapMessageV6(r: CarbonVoiceMessageV6): CarbonVoiceMessage {
     textModels.push({ type: 'summary', audio_id: null, language_id: language, value: c.ai_summary })
   }
 
+  // Only a real audio file counts: `streaming_url` is an HLS playlist, which would be saved as a
+  // broken .mp3 in download mode and then never re-fetched.
   const audioModels: CarbonVoiceAudioModel[] = []
-  const audioUrl = c.presigned_url || c.url || c.streaming_url || ''
+  const audioUrl = c.presigned_url || c.url || ''
   if (audioUrl) {
     audioModels.push({
       _id: r.id,
@@ -340,7 +340,8 @@ function mapMessageV6(r: CarbonVoiceMessageV6): CarbonVoiceMessage {
     channel_ids: r.conversation_id ? [r.conversation_id] : [],
     // A message is a reply exactly when its thread differs from its own id.
     parent_message_id: r.thread_id && r.thread_id !== r.id ? r.thread_id : null,
-    name: null,
+    // MessageV6 doesn't currently emit the memo name (v3 did); mapped so it flows through if added.
+    name: r.name?.trim() || null,
     // Only an `audio` kind is an audio message; everything else (text, ai-*, action items…) is
     // rendered as text so it never shows a phantom duration or audio player. `kind` is optional in
     // v6, so when it's missing, fall back to whether the message actually has audio.

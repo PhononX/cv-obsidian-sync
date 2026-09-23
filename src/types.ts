@@ -81,10 +81,10 @@ export interface CarbonVoiceAttachment {
   length_in_bytes: number | null
 }
 
-// Reference to an AI response generated for a message. Carried on the recent-list payload
-// (v5) so we know which responses exist without a separate lookup; the response body itself is
-// fetched on demand via GET /responses/{id}. `prompt_id` names the prompt that produced it —
-// resolved to a human label via GET /prompts.
+// Reference to an AI response generated for a message. Carried on the v6 message payload so we
+// know which responses exist without a separate lookup; the response body itself is fetched on
+// demand via GET /responses/{id}. `prompt_id` names the prompt that produced it — resolved to a
+// human label via GET /prompts.
 export interface CarbonVoiceAiResponseRef {
   id: string
   prompt_id: string
@@ -159,7 +159,8 @@ export interface CarbonVoiceMessageContentV6 {
 // GET /v6/messages/updates (last_updated_at order). Scope is single-valued (conversation_id /
 // workspace_id) where v3 used arrays. Content lives under `content`, which is omitted when the
 // message has neither audio nor text. `thread_id` replaces v5's parent_message_id: a message is a
-// reply exactly when thread_id !== id. There is no `name` field.
+// reply exactly when thread_id !== id. `name` (a memo's user-set title) isn't emitted by the
+// server yet; it's declared so the plugin picks it up once it is.
 export interface CarbonVoiceMessageV6 {
   id: string
   type: MessageType
@@ -177,6 +178,7 @@ export interface CarbonVoiceMessageV6 {
   ai_response_ids?: CarbonVoiceAiResponseRef[]
   content?: CarbonVoiceMessageContentV6
   notes?: string | null
+  name?: string | null
   link: string
 }
 
@@ -320,8 +322,8 @@ export interface CarbonVoiceSettings {
   syncFolder: string
   syncInterval: number
   includeTranscripts: boolean
-  // Pull the AI responses attached to a message (per its ai_response_ids) into the note under an
-  // "AI Responses" section. When off, no /responses or /prompts calls are made.
+  // "Sync AI artifacts": write each AI response as a note under AI artifacts/ and link it from its
+  // source messages. When off, no /responses or /prompts calls are made.
   includeAiResponses: boolean
   // Cross-link notes: generate People/Workspace stub notes and link participants, senders and
   // workspaces so the Obsidian graph and backlinks connect everything.
