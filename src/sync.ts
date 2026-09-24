@@ -1,6 +1,6 @@
 import { TFile, TFolder, normalizePath } from 'obsidian'
 import type CarbonVoiceSyncPlugin from './main'
-import { CarbonVoiceAPI, CarbonVoiceApiError } from './api'
+import { CarbonVoiceAPI, CarbonVoiceApiError, mapMessageV6 } from './api'
 import type { MessagePageV6, MessagesV6QueryParams } from './api'
 import type {
   CarbonVoiceMessage,
@@ -21,8 +21,27 @@ interface RenderedAiResponse {
   linkTarget: string
 }
 
+// What an AI response is attached to, decided from its source message. The response's own
+// channel_id can't be trusted for this: the server's auto-run responses (e.g. Bulleted Summary)
+// never set one, even on conversation messages. `message` is null when the source is known only
+// from an existing voice-memo note.
+interface ResponseSource {
+  isVoiceMemo: boolean
+  message: CarbonVoiceMessage | null
+}
+
 // Shared state for the AI-response pass, built once per run.
 interface AiContext {
+  // Source message id → message (null after a failed lookup). Seeded with the messages the run
+  // already fetched; others are fetched on demand, at most once per run.
+  sources: Map<string, CarbonVoiceMessage | null>
+  // Ids of voice memos that already have a note, which classifies a response's source as a memo
+  // without a lookup.
+  memoNoteIds: Set<string>
+  // Existing artifact notes by source message id (their message_ids / cv_message_id frontmatter).
+  // Messages don't carry ai_response_ids (the server doesn't populate them yet), so this is what
+  // keeps a message linked to artifacts written in earlier runs.
+  existingByMessage: Map<string, TFile[]>
   // prompt_id → prompt name, which labels a response and names its artifact folder.
   promptNames: Map<string, string>
   // False when GET /prompts failed. New artifacts are then held back rather than filed under a
@@ -66,14 +85,12 @@ const PAGE = 50
 // Top-level folder (under the sync root) holding one note per AI response.
 const ARTIFACTS_DIR = 'AI artifacts'
 // The "Bulleted Summary" prompt, which the server auto-runs on nearly every new message (id is
-// hard-coded in cv-api's message.service.ts). On conversation messages it would flood AI artifacts,
-// so it's skipped there; on voice memos it's kept.
+// hard-coded in cv-api's message.service.ts). It's kept in AI artifacts only for voice memos; on
+// conversation messages it would flood the folder.
 const BULLETED_SUMMARY_PROMPT_ID = '66859b7f6928970bb4f1c24a'
 
-// Whether an AI response is left out of AI artifacts: a Bulleted Summary on a conversation message
-// (one with a channel). `channelId` is the response's channel, or the message's for a reference.
-function isExcludedArtifact(promptId: string | null | undefined, channelId: string | null | undefined): boolean {
-  return promptId === BULLETED_SUMMARY_PROMPT_ID && !!channelId
+function isBulletedSummary(promptId: unknown): boolean {
+  return promptId === BULLETED_SUMMARY_PROMPT_ID
 }
 // v6 message feeds are keyset-paginated and reliable at their default page size, so we request the
 // larger page to cut round-trips (the /responses feed keeps the smaller PAGE).
@@ -213,7 +230,7 @@ export class CarbonVoiceSync {
     const memos = messages.filter(m => this.isVoiceMemo(m) && this.memoInScope(m))
     const convMsgs = await this.selectConversationMessages(api, messages)
 
-    const ai = await this.buildAiContext(api)
+    const ai = await this.buildAiContext(api, messages)
     const artifacts = await this.syncResponses(api, dateAnchor, ai, {
       onWritten: n => {
         progress.artifacts = n
@@ -276,20 +293,24 @@ export class CarbonVoiceSync {
     })
     progress.phase = 'writing'
 
-    // The /responses feed over the same span, writing artifacts only for the categories being
-    // imported and each within its own window — so a 'None' category pulls none, and a short
-    // conversation window isn't widened to the voice-memo one. Honours the AI-artifacts toggle
-    // inside syncResponses.
-    const ai = await this.buildAiContext(api)
+    // The /responses feed over the same span, writing artifacts only for messages this import
+    // brings in — so a 'None' category pulls none, and a short conversation window isn't widened to
+    // the voice-memo one. No source lookups: a response whose message wasn't fetched here belongs
+    // to a message outside the import. Honours the AI-artifacts toggle inside syncResponses.
+    const ai = await this.buildAiContext(api, messages)
     const artifacts = await this.syncResponses(api, earliest, ai, {
       onWritten: n => {
         progress.artifacts = n
         onProgress?.(progress)
       },
-      accept: r =>
-        r.channel_id
-          ? convSince != null && r.created_at >= convSince
-          : memoSince != null && r.created_at >= memoSince,
+      lookupSources: false,
+      accept: (r, src) => {
+        if (!src) return false
+        const created = src.message?.created_at ?? r.created_at
+        return src.isVoiceMemo
+          ? memoSince != null && created >= memoSince
+          : convSince != null && created >= convSince
+      },
     })
 
     let voiceMemos = 0
@@ -328,8 +349,12 @@ export class CarbonVoiceSync {
     if (window === 'none' || !this.settings.includeAiResponses) return 0
     const api = new CarbonVoiceAPI(this.settings.apiToken)
     await this.ensureBaseViews()
-    const ai = await this.buildAiContext(api)
-    return this.syncResponses(api, this.windowToSince(window), ai, { onWritten: onProgress })
+    const since = this.windowToSince(window)
+    // Messages created in the same window classify most responses in bulk (auto-run ones land on
+    // new messages); responses on older messages are looked up individually.
+    const seed = await this.collectCreatedSince(api, since)
+    const ai = await this.buildAiContext(api, seed)
+    return this.syncResponses(api, since, ai, { onWritten: onProgress })
   }
 
   // ── Message fetching ────────────────────────────────────────────────────
@@ -911,13 +936,12 @@ export class CarbonVoiceSync {
     }
   }
 
-  // Whether a response from the /responses feed falls within what the user syncs, so the bulk feed
-  // pass only writes artifacts for in-scope messages. A response on a conversation message (it has
-  // a channel_id) follows the conversation scope — the single-valued analogue of convInScope +
-  // matchesAsyncRule. One on a voice memo (no channel_id) follows the voice-memo scope; a
-  // folder-scoped memo can't be matched here because a response carries no folder, so those are
-  // skipped and written by resolveAiLinks as each in-scope memo syncs. That per-message path also
-  // covers any other in-scope response the feed misses (e.g. one outside its window).
+  // Fallback scope check for a /responses feed item whose source message couldn't be determined
+  // (sourceInScope is used whenever it can). Works off the response's own channel_id, which the
+  // server leaves unset on auto-run responses, so it's a best effort: with a channel it follows the
+  // conversation scope (the single-valued analogue of convInScope + matchesAsyncRule); without one
+  // it follows the voice-memo scope, where a folder scope can't be matched (a response carries no
+  // folder) and is skipped.
   private responseInScope(resp: CarbonVoiceAiResponse): boolean {
     const s = this.settings
     if (!resp.channel_id) {
@@ -997,13 +1021,18 @@ export class CarbonVoiceSync {
 
   // ── AI responses ───────────────────────────────────────────────────────────
 
-  // Builds the run's AI-response context. Prompt names and the existing-artifact index are only
-  // loaded when AI artifacts are on, and workspace names only when something needs them — so a
-  // quiet sync with nothing to write makes no /prompts or /workspaces calls.
-  private async buildAiContext(api: CarbonVoiceAPI): Promise<AiContext> {
+  // Builds the run's AI-response context. Prompt names and the vault indexes are only loaded when
+  // AI artifacts are on, and workspace names only when something needs them — so a quiet sync with
+  // nothing to write makes no /prompts or /workspaces calls. `seed` is the messages this run has
+  // already fetched, used to classify responses without extra lookups.
+  private async buildAiContext(
+    api: CarbonVoiceAPI,
+    seed: CarbonVoiceMessage[] = []
+  ): Promise<AiContext> {
+    const on = this.settings.includeAiResponses
     const promptNames = new Map<string, string>()
     let promptsLoaded = false
-    if (this.settings.includeAiResponses) {
+    if (on) {
       try {
         for (const p of await api.getPrompts()) if (p.id) promptNames.set(p.id, p.name?.trim() || p.id)
         promptsLoaded = true
@@ -1011,18 +1040,71 @@ export class CarbonVoiceSync {
         console.warn('Carbon Voice: could not fetch prompt names; holding back new AI artifacts', err)
       }
     }
+    const existingArtifacts: Map<string, TFile> = on
+      ? this.notesByFrontmatterId(`${this.root()}/${ARTIFACTS_DIR}`, 'cv_response_id')
+      : new Map()
+    const existingByMessage = new Map<string, TFile[]>()
+    for (const file of existingArtifacts.values()) {
+      const fm = this.app.metadataCache.getFileCache(file)?.frontmatter
+      const ids = new Set<string>()
+      if (Array.isArray(fm?.message_ids)) {
+        for (const id of fm.message_ids) if (typeof id === 'string') ids.add(id)
+      }
+      if (typeof fm?.cv_message_id === 'string') ids.add(fm.cv_message_id)
+      for (const id of ids) existingByMessage.set(id, [...(existingByMessage.get(id) ?? []), file])
+    }
     let workspaces: Promise<Map<string, string>> | null = null
     return {
+      sources: new Map(seed.map(m => [m.message_id, m])),
+      memoNoteIds: on
+        ? new Set(this.notesByFrontmatterId(`${this.root()}/Voice Memos`, 'cv_memo_id').keys())
+        : new Set(),
+      existingByMessage,
       promptNames,
       promptsLoaded,
       loadWorkspaces: () => (workspaces ??= this.fetchWorkspaceNames(api)),
       index: new Map(),
       byMessage: new Map(),
-      existingArtifacts: this.settings.includeAiResponses
-        ? this.notesByFrontmatterId(`${this.root()}/${ARTIFACTS_DIR}`, 'cv_response_id')
-        : new Map(),
+      existingArtifacts,
       claimedArtifacts: new Map(),
     }
+  }
+
+  // The source message of a response (its first message id), classified as voice memo or
+  // conversation: from the run's messages, else an existing voice-memo note, else one cached
+  // GET /v6/messages/{id}. Null when it can't be determined — the response names no message, the
+  // lookup failed, or lookups are off (`lookup` false). A Bulleted Summary never triggers a lookup:
+  // it's kept only on voice memos, which the first two checks already recognise, and nearly every
+  // message has one.
+  private async responseSource(
+    api: CarbonVoiceAPI,
+    resp: CarbonVoiceAiResponse,
+    ai: AiContext,
+    lookup: boolean
+  ): Promise<ResponseSource | null> {
+    const id = resp.message_ids?.[0]
+    if (!id) return null
+    const known = ai.sources.get(id)
+    if (known) return { isVoiceMemo: this.isVoiceMemo(known), message: known }
+    if (ai.memoNoteIds.has(id)) return { isVoiceMemo: true, message: null }
+    if (ai.sources.has(id) || !lookup || isBulletedSummary(resp.prompt_id)) return null
+    let message: CarbonVoiceMessage | null = null
+    try {
+      message = mapMessageV6(await api.getMessage(id))
+    } catch (err) {
+      console.warn(`Carbon Voice: could not look up message ${id} for an AI response`, err)
+    }
+    ai.sources.set(id, message)
+    return message ? { isVoiceMemo: this.isVoiceMemo(message), message } : null
+  }
+
+  // Whether a response's source message is in the user's sync scope. A source known only from an
+  // existing memo note was in scope when that note was written, so it counts.
+  private sourceInScope(src: ResponseSource): boolean {
+    const m = src.message
+    if (!m) return true
+    if (src.isVoiceMemo) return this.memoInScope(m)
+    return this.convInScope(m) || this.matchesAsyncRule(m, this.asyncRuleWorkspaceIds())
   }
 
   // Notes under `folder` keyed by a frontmatter id (e.g. cv_memo_id, cv_response_id), so an item
@@ -1067,10 +1149,13 @@ export class CarbonVoiceSync {
     ai: AiContext,
     opts: {
       onWritten?: (n: number) => void
-      accept?: (resp: CarbonVoiceAiResponse) => boolean
+      accept?: (resp: CarbonVoiceAiResponse, src: ResponseSource | null) => boolean
+      // Look up source messages the run didn't fetch (default true). History import turns this off:
+      // it only wants artifacts for the messages it's importing.
+      lookupSources?: boolean
     } = {}
   ): Promise<number> {
-    const { onWritten, accept } = opts
+    const { onWritten, accept, lookupSources = true } = opts
     if (!this.settings.includeAiResponses) return 0
     let written = 0
     let cursor = sinceIso
@@ -1087,14 +1172,15 @@ export class CarbonVoiceSync {
       if (page.length === 0) break
       let newest = cursor
       for (const resp of page) {
-        if (
-          !ai.index.has(resp.id) &&
-          this.responseInScope(resp) &&
-          (accept?.(resp) ?? true) &&
-          (await this.writeArtifact(resp, ai))
-        ) {
-          written++
-          onWritten?.(written)
+        if (!ai.index.has(resp.id)) {
+          const src = await this.responseSource(api, resp, ai, lookupSources)
+          // Scope comes from the source message when known; otherwise fall back to the response's
+          // own (possibly missing) channel.
+          const inScope = src ? this.sourceInScope(src) : this.responseInScope(resp)
+          if (inScope && (accept?.(resp, src) ?? true) && (await this.writeArtifact(resp, ai, src))) {
+            written++
+            onWritten?.(written)
+          }
         }
         // Advance by created_at — the feed's `date` orders by creation, like the message scans.
         if (resp.created_at > newest) newest = resp.created_at
@@ -1107,43 +1193,52 @@ export class CarbonVoiceSync {
     return written
   }
 
-  // Resolves the artifact links for a message: the response ids on the message itself
-  // (ai_response_ids) plus any the /responses feed attributed to it this run (`ai.byMessage`),
-  // de-duplicated. A response whose note already exists is linked as-is, with no fetch or rewrite —
-  // otherwise every sync touching a conversation period would re-download and rewrite the
-  // artifacts of all its messages. Existing notes are refreshed only by the /responses feed and the
-  // AI artifacts import. Only responses with no note yet are fetched; failures are logged and skipped.
+  // Resolves the artifact links for a message, keyed by response id so each appears once:
+  //   1. artifact notes already in the vault whose message_ids name this message — this is what
+  //      keeps links from earlier runs, since messages carry no ai_response_ids today;
+  //   2. responses the /responses feed attributed to it this run (`ai.byMessage`);
+  //   3. the message's own ai_response_ids, for when the server starts populating them — a
+  //      response with an existing note is linked as-is, and only unseen ones are fetched.
+  // A Bulleted Summary is linked only on a voice memo.
   private async resolveAiLinks(
     api: CarbonVoiceAPI,
     m: CarbonVoiceMessage,
     ai: AiContext
   ): Promise<RenderedAiResponse[]> {
     if (!this.settings.includeAiResponses) return []
-    const ids = new Set<string>(ai.byMessage.get(m.message_id) ?? [])
-    for (const ref of m.ai_response_ids ?? []) {
-      // Checked on the reference so an excluded response is never fetched — nearly every
-      // conversation message carries a Bulleted Summary.
-      if (isExcludedArtifact(ref.prompt_id, m.channel_ids[0])) continue
-      ids.add(ref.id)
-      if (ai.index.has(ref.id)) continue
-      const existing = ai.existingArtifacts.get(ref.id)
-      if (existing) {
-        ai.index.set(ref.id, this.existingArtifactLink(existing, ai, ref.prompt_id))
-        continue
-      }
-      try {
-        await this.writeArtifact(await api.getResponse(ref.id), ai)
-      } catch (err) {
-        console.warn(`Carbon Voice: could not fetch AI response ${ref.id}`, err)
-        ai.index.set(ref.id, null)
-      }
+    const src: ResponseSource = { isVoiceMemo: this.isVoiceMemo(m), message: m }
+    const links = new Map<string, RenderedAiResponse>()
+    for (const file of ai.existingByMessage.get(m.message_id) ?? []) {
+      const fm = this.app.metadataCache.getFileCache(file)?.frontmatter
+      const responseId: unknown = fm?.cv_response_id
+      const promptId: unknown = fm?.cv_prompt_id
+      if (typeof responseId !== 'string') continue
+      if (isBulletedSummary(promptId) && !src.isVoiceMemo) continue
+      links.set(responseId, this.existingArtifactLink(file, ai, typeof promptId === 'string' ? promptId : undefined))
     }
-    const out: RenderedAiResponse[] = []
-    for (const id of ids) {
+    for (const id of ai.byMessage.get(m.message_id) ?? []) {
       const hit = ai.index.get(id)
-      if (hit) out.push(hit)
+      if (hit) links.set(id, hit)
     }
-    return out
+    for (const ref of m.ai_response_ids ?? []) {
+      if (isBulletedSummary(ref.prompt_id) && !src.isVoiceMemo) continue
+      if (!ai.index.has(ref.id)) {
+        const existing = ai.existingArtifacts.get(ref.id)
+        if (existing) {
+          ai.index.set(ref.id, this.existingArtifactLink(existing, ai, ref.prompt_id))
+        } else {
+          try {
+            await this.writeArtifact(await api.getResponse(ref.id), ai, src)
+          } catch (err) {
+            console.warn(`Carbon Voice: could not fetch AI response ${ref.id}`, err)
+            ai.index.set(ref.id, null)
+          }
+        }
+      }
+      const hit = ai.index.get(ref.id)
+      if (hit) links.set(ref.id, hit)
+    }
+    return [...links.values()]
   }
 
   // Writes one response's artifact note (upserted, since a response can be regenerated) and records
@@ -1152,8 +1247,14 @@ export class CarbonVoiceSync {
   //   AI artifacts/<workspace>/<prompt name>/<date>-<voice memo|conversation message>.md
   // browsable by workspace and prompt; a short response-id tag is appended only when a *different*
   // response would otherwise collide (see resolveArtifactNotePath).
-  private async writeArtifact(resp: CarbonVoiceAiResponse, ai: AiContext): Promise<boolean> {
-    const body = isExcludedArtifact(resp.prompt_id, resp.channel_id) ? null : renderAiResponseBody(resp)
+  private async writeArtifact(
+    resp: CarbonVoiceAiResponse,
+    ai: AiContext,
+    src: ResponseSource | null
+  ): Promise<boolean> {
+    // A Bulleted Summary is kept only when its source is known to be a voice memo.
+    const excluded = isBulletedSummary(resp.prompt_id) && !src?.isVoiceMemo
+    const body = excluded ? null : renderAiResponseBody(resp)
     if (!body) {
       ai.index.set(resp.id, null)
       return false
@@ -1171,6 +1272,14 @@ export class CarbonVoiceSync {
       : ai.promptNames.get(resp.prompt_id) || 'AI Response'
     const workspaces = await ai.loadWorkspaces()
     const wsName = (resp.workspace_id && workspaces.get(resp.workspace_id)) || ''
+    // Labelled from the source message; the response's channel_id is only a fallback (it's missing
+    // on auto-run responses, which would otherwise all read as voice memos).
+    const sourceType = src
+      ? src.isVoiceMemo
+        ? 'voice memo'
+        : 'conversation message'
+      : artifactSourceType(resp)
+    const conversationId = resp.channel_id || src?.message?.channel_ids[0] || null
     let linkTarget: string
     if (existing) {
       linkTarget = existing.path.replace(/\.md$/i, '')
@@ -1180,10 +1289,13 @@ export class CarbonVoiceSync {
       const folder = normalizePath(
         `${this.root()}/${ARTIFACTS_DIR}/${sanitize(wsName || 'Unfiled')}/${sanitize(promptName)}`
       )
-      const base = normalizePath(`${folder}/${sanitize(`${date}-${artifactSourceType(resp)}`)}`)
+      const base = normalizePath(`${folder}/${sanitize(`${date}-${sourceType}`)}`)
       linkTarget = await this.resolveArtifactNotePath(base, resp.id, ai.claimedArtifacts)
     }
-    await this.upsertFile(`${linkTarget}.md`, this.buildArtifactNote(resp, promptName, wsName, body))
+    await this.upsertFile(
+      `${linkTarget}.md`,
+      this.buildArtifactNote(resp, promptName, wsName, body, sourceType, conversationId)
+    )
     ai.index.set(resp.id, { promptName, linkTarget })
     // Attribute this response to each of its source messages so those messages can link to it
     // even when their payload carries no ai_response_ids.
@@ -1239,7 +1351,9 @@ export class CarbonVoiceSync {
     resp: CarbonVoiceAiResponse,
     promptName: string,
     wsName: string,
-    body: string
+    body: string,
+    sourceType: string,
+    conversationId: string | null
   ): string {
     const created = resp.created_at ? resp.created_at.slice(0, 10) : ''
     const messageIds = resp.message_ids ?? []
@@ -1251,8 +1365,8 @@ export class CarbonVoiceSync {
     ]
     if (wsName) fm.push(`workspace_name: ${yaml(wsName)}`)
     if (resp.workspace_id) fm.push(`workspace_id: ${resp.workspace_id}`)
-    fm.push(`source_type: ${yaml(artifactSourceType(resp))}`)
-    if (resp.channel_id) fm.push(`cv_conversation_id: ${resp.channel_id}`)
+    fm.push(`source_type: ${yaml(sourceType)}`)
+    if (conversationId) fm.push(`cv_conversation_id: ${conversationId}`)
     // Source message ids: a plural list (a response can span several messages) plus a singular
     // `cv_message_id` for the common one-message case, so the artifact is queryable from either.
     if (messageIds.length) {

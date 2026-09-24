@@ -279,7 +279,7 @@ export class CarbonVoiceAPI {
 // audio_models list the engine reads. Scope is single-valued (wrapped back into arrays), and
 // `thread_id` stands in for parent_message_id. v6 doesn't send the memo `name` today, so a voice
 // memo's title falls back to its summary/transcript. `ai_response_ids` are kept for AI artifacts.
-function mapMessageV6(r: CarbonVoiceMessageV6): CarbonVoiceMessage {
+export function mapMessageV6(r: CarbonVoiceMessageV6): CarbonVoiceMessage {
   const c = r.content ?? {}
   const language = c.language ?? ''
 
