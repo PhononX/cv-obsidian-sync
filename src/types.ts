@@ -159,8 +159,8 @@ export interface CarbonVoiceMessageContentV6 {
 // GET /v6/messages/updates (last_updated_at order). Scope is single-valued (conversation_id /
 // workspace_id) where v3 used arrays. Content lives under `content`, which is omitted when the
 // message has neither audio nor text. `thread_id` replaces v5's parent_message_id: a message is a
-// reply exactly when thread_id !== id. `name` (a memo's user-set title) isn't emitted by the
-// server yet; it's declared so the plugin picks it up once it is.
+// reply exactly when thread_id !== id. `name` is the message's user-set title, omitted when it has
+// none.
 export interface CarbonVoiceMessageV6 {
   id: string
   type: MessageType

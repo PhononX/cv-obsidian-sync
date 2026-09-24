@@ -81,7 +81,8 @@ export interface SyncProgress {
   artifacts: number
 }
 
-const PAGE = 50
+// GET /responses page size: the server's maximum.
+const RESPONSES_PAGE = 100
 // Top-level folder (under the sync root) holding one note per AI response.
 const ARTIFACTS_DIR = 'AI artifacts'
 // The "Bulleted Summary" prompt, which the server auto-runs on nearly every new message (id is
@@ -93,7 +94,7 @@ function isBulletedSummary(promptId: unknown): boolean {
   return promptId === BULLETED_SUMMARY_PROMPT_ID
 }
 // v6 message feeds are keyset-paginated and reliable at their default page size, so we request the
-// larger page to cut round-trips (the /responses feed keeps the smaller PAGE).
+// full page to cut round-trips.
 const MESSAGE_PAGE = 200
 const MAX_PAGES = 500 // safety cap on pagination loops
 
@@ -472,8 +473,8 @@ export class CarbonVoiceSync {
     const folders = await this.fetchFolders(api)
     const workspaces = await ai.loadWorkspaces()
     // Memo notes already in the vault, by memo id. A memo keeps its existing note even when its
-    // computed title changes — e.g. v6 no longer sends a memo's name, so a named memo's title now
-    // falls back to its summary; without this, re-syncing it would fork a second note.
+    // computed title changes (a rename, or a summary-based title that shifts when the summary is
+    // regenerated); without this, re-syncing it would fork a second note.
     const existingNotes = this.notesByFrontmatterId(`${this.root()}/Voice Memos`, 'cv_memo_id')
 
     let count = 0
@@ -1138,11 +1139,17 @@ export class CarbonVoiceSync {
     return { promptName, linkTarget: file.path.replace(/\.md$/i, '') }
   }
 
-  // Syncs AI responses directly from the /responses feed, paging forward from `sinceIso` and
+  // Syncs AI responses from the /responses feed that were created or updated since `sinceIso`,
   // writing each in-scope one to its own artifact note. This is the bulk artifact sync; it also
   // populates `ai.index` so message linking is a lookup rather than a per-message fetch. `accept`
   // narrows it further (history import uses it to keep only the categories and windows being
   // imported). Returns the number of artifact notes written.
+  //
+  // The endpoint has no cursor and always returns newest-first by last_updated_at (see
+  // ResponsesQueryParams), so the window is walked `older` from the newest response down to
+  // `sinceIso`. Each next page is anchored 1ms above the previous page's oldest timestamp, because
+  // the server's strict `<` would otherwise drop rows sharing that boundary; the overlap is skipped
+  // by id.
   private async syncResponses(
     api: CarbonVoiceAPI,
     sinceIso: string,
@@ -1158,20 +1165,27 @@ export class CarbonVoiceSync {
     const { onWritten, accept, lookupSources = true } = opts
     if (!this.settings.includeAiResponses) return 0
     let written = 0
-    let cursor = sinceIso
+    const seen = new Set<string>()
+    let cursor: string | undefined
     for (let i = 0; i < MAX_PAGES; i++) {
       let page
       try {
-        page = await api.getResponses({ date: cursor, direction: 'newer', limit: PAGE })
+        page = await api.getResponses({ date: cursor, direction: 'older', limit: RESPONSES_PAGE })
       } catch (err) {
         // The feed endpoint is unavailable — stop the pass. Message-referenced responses still get
         // picked up individually by resolveAiLinks' fallback.
         console.warn('Carbon Voice: could not fetch AI responses feed', err)
         break
       }
-      if (page.length === 0) break
-      let newest = cursor
+      let fresh = 0
+      let oldest: string | null = null
       for (const resp of page) {
+        const updated = resp.last_updated_at || resp.created_at
+        if (oldest == null || updated < oldest) oldest = updated
+        if (seen.has(resp.id)) continue
+        seen.add(resp.id)
+        fresh++
+        if (updated < sinceIso) continue
         if (!ai.index.has(resp.id)) {
           const src = await this.responseSource(api, resp, ai, lookupSources)
           // Scope comes from the source message when known; otherwise fall back to the response's
@@ -1182,13 +1196,13 @@ export class CarbonVoiceSync {
             onWritten?.(written)
           }
         }
-        // Advance by created_at — the feed's `date` orders by creation, like the message scans.
-        if (resp.created_at > newest) newest = resp.created_at
       }
-      // A short page is not end-of-data (the endpoint may cap page size); stop only when a page is
-      // empty or the cursor can't move forward.
-      if (newest === cursor) break
-      cursor = newest
+      // Done once the page reaches back past the window, comes back short (it's a plain limited
+      // query, so short means nothing older remains), or adds nothing new (all boundary overlap).
+      if (page.length < RESPONSES_PAGE || fresh === 0 || oldest == null || oldest < sinceIso) break
+      const next = Date.parse(oldest) + 1
+      if (Number.isNaN(next)) break
+      cursor = new Date(next).toISOString()
     }
     return written
   }

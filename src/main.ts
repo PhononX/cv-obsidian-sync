@@ -37,8 +37,11 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
 
     this.registerSyncInterval()
 
+    // Wait for the layout: before then the metadata cache isn't populated, so the sync can't find
+    // existing memo and artifact notes by their frontmatter ids and would fork duplicates or drop
+    // links to earlier artifacts.
     if (this.settings.syncOnStartup && this.settings.apiToken) {
-      void this.runSync()
+      this.app.workspace.onLayoutReady(() => void this.runSync())
     }
   }
 

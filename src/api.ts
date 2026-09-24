@@ -45,8 +45,12 @@ export interface GetMessageOptions {
   fresh?: boolean
 }
 
+// Query for GET /responses. The server filters on last_updated_at (`newer`: after `date`,
+// `older`: before it) but always returns newest-first, capped at `limit` (default 50, max 100),
+// with no cursor — so walking a window means paging `older` from the newest. Omit `date` for the
+// newest page.
 export interface ResponsesQueryParams {
-  date: string
+  date?: string
   direction: MessageDirection
   limit?: number
 }
@@ -233,7 +237,7 @@ export class CarbonVoiceAPI {
   // in bulk. Paged like the message scans (date cursor + direction).
   async getResponses(params: ResponsesQueryParams): Promise<CarbonVoiceAiResponse[]> {
     const qs = new URLSearchParams()
-    qs.set('date', params.date)
+    if (params.date) qs.set('date', params.date)
     qs.set('direction', params.direction)
     if (params.limit != null) qs.set('limit', String(params.limit))
     return this.get<CarbonVoiceAiResponse[]>(`/responses?${qs.toString()}`)
@@ -277,8 +281,9 @@ export class CarbonVoiceAPI {
 // language and audio all live under `content` (omitted when the message has neither audio nor
 // text). They're re-expressed here as the `transcript` / `summary` text models and a one-entry
 // audio_models list the engine reads. Scope is single-valued (wrapped back into arrays), and
-// `thread_id` stands in for parent_message_id. v6 doesn't send the memo `name` today, so a voice
-// memo's title falls back to its summary/transcript. `ai_response_ids` are kept for AI artifacts.
+// `thread_id` stands in for parent_message_id. A memo's user-set `name` titles its note when
+// present (omitted otherwise, when the title falls back to summary/transcript). `ai_response_ids`
+// are kept for AI artifacts, though the server doesn't populate them yet.
 export function mapMessageV6(r: CarbonVoiceMessageV6): CarbonVoiceMessage {
   const c = r.content ?? {}
   const language = c.language ?? ''
@@ -340,7 +345,7 @@ export function mapMessageV6(r: CarbonVoiceMessageV6): CarbonVoiceMessage {
     channel_ids: r.conversation_id ? [r.conversation_id] : [],
     // A message is a reply exactly when its thread differs from its own id.
     parent_message_id: r.thread_id && r.thread_id !== r.id ? r.thread_id : null,
-    // MessageV6 doesn't currently emit the memo name (v3 did); mapped so it flows through if added.
+    // The user-set name (title); v6 omits it when the message has none.
     name: r.name?.trim() || null,
     // Only an `audio` kind is an audio message; everything else (text, ai-*, action items…) is
     // rendered as text so it never shows a phantom duration or audio player. `kind` is optional in
