@@ -257,6 +257,20 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
       )
 
     new Setting(containerEl)
+      .setName('Sync AI artifacts')
+      .setDesc(
+        'Sync AI artifacts (summaries, action items and other prompt outputs) into an AI artifacts folder, linked from each message'
+      )
+      .addToggle(toggle =>
+        toggle
+          .setValue(this.plugin.settings.includeAiResponses)
+          .onChange(async value => {
+            this.plugin.settings.includeAiResponses = value
+            await this.plugin.saveSettings()
+          })
+      )
+
+    new Setting(containerEl)
       .setName('Link people & workspaces')
       .setDesc(
         'Create People and Workspace notes and link participants, senders and workspaces so the graph and backlinks connect everything'
@@ -359,7 +373,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
 
     new Setting(containerEl).setName('Historical import').setHeading()
     containerEl.createEl('p', {
-      text: 'Forward sync only pulls new activity. Import older data once — both categories are fetched together in a single pass, each using its own window and honouring its scope above.',
+      text: 'Forward sync only pulls new activity. Import older data once. Conversations and voice memos share the messages endpoint and are fetched together; set either to None to skip it.',
       cls: 'setting-item-description',
     })
 
@@ -368,7 +382,7 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Import now')
-      .setDesc('Fetch and write both categories for the windows above')
+      .setDesc('Fetch and write conversations and voice memos for the windows above')
       .addButton(btn =>
         btn
           .setButtonText('Import')
@@ -378,15 +392,30 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
             this.display()
           })
       )
+
+    // AI artifacts import — a separate pass over the /responses feed (a different endpoint from the
+    // message import above), so users can pull historical AI artifacts on their own window. Requires
+    // "Sync AI artifacts" to be on (the button reminds them if not).
+    this.renderHistoryWindow(containerEl, 'AI artifact history', 'artifactHistoryWindow')
+    new Setting(containerEl)
+      .setName('Import AI artifacts')
+      .setDesc('Fetch and write AI artifacts for the window above, honouring the conversation scope')
+      .addButton(btn =>
+        btn.setButtonText('Import artifacts').onClick(async () => {
+          await this.plugin.runImportArtifacts()
+          this.display()
+        })
+      )
   }
 
   private renderHistoryWindow(
     containerEl: HTMLElement,
     name: string,
-    windowKey: 'conversationHistoryWindow' | 'voiceMemoHistoryWindow'
+    windowKey: 'conversationHistoryWindow' | 'voiceMemoHistoryWindow' | 'artifactHistoryWindow'
   ): void {
     new Setting(containerEl).setName(name).addDropdown(drop =>
       drop
+        .addOption('none', 'None')
         .addOption('7', 'Last 7 days')
         .addOption('30', 'Last 30 days')
         .addOption('90', 'Last 90 days')
@@ -395,7 +424,11 @@ export class CarbonVoiceSettingTab extends PluginSettingTab {
         .setValue(String(this.plugin.settings[windowKey]))
         .onChange(async value => {
           this.plugin.settings[windowKey] =
-            value === 'all' ? 'all' : (parseInt(value) as 7 | 30 | 90 | 365)
+            value === 'none'
+              ? 'none'
+              : value === 'all'
+                ? 'all'
+                : (parseInt(value) as 7 | 30 | 90 | 365)
           await this.plugin.saveSettings()
         })
     )

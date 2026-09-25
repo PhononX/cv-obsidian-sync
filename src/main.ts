@@ -2,7 +2,7 @@ import { Notice, Plugin, WorkspaceLeaf } from 'obsidian'
 import { CarbonVoiceSettings, DEFAULT_SETTINGS } from './types'
 import { CarbonVoiceSettingTab } from './settings'
 import { CarbonVoiceSync } from './sync'
-import type { SyncProgress } from './sync'
+import type { SyncProgress, SyncResult } from './sync'
 import { CarbonVoiceView, CARBON_VOICE_VIEW } from './view'
 
 export default class CarbonVoiceSyncPlugin extends Plugin {
@@ -37,8 +37,11 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
 
     this.registerSyncInterval()
 
+    // Wait for the layout: before then the metadata cache isn't populated, so the sync can't find
+    // existing memo and artifact notes by their frontmatter ids and would fork duplicates or drop
+    // links to earlier artifacts.
     if (this.settings.syncOnStartup && this.settings.apiToken) {
-      void this.runSync()
+      this.app.workspace.onLayoutReady(() => void this.runSync())
     }
   }
 
@@ -68,9 +71,7 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
           'Carbon Voice: Connected. New activity syncs from now — use Import history for past data.'
         )
       } else {
-        new Notice(
-          `Carbon Voice: Synced ${res.conversations} conversation file(s), ${res.voiceMemos} voice memo(s)`
-        )
+        new Notice(`Carbon Voice: Synced ${summarizeResult(res)}`)
       }
     } catch (err) {
       notice.hide()
@@ -100,12 +101,41 @@ export default class CarbonVoiceSyncPlugin extends Plugin {
         p => notice.setMessage(progressMessage('Carbon Voice: Importing…', p))
       )
       notice.hide()
-      new Notice(
-        `Carbon Voice: Imported ${res.conversations} conversation file(s), ${res.voiceMemos} voice memo(s)`
-      )
+      new Notice(`Carbon Voice: Imported ${summarizeResult(res)}`)
     } catch (err) {
       notice.hide()
       new Notice(`Carbon Voice: Import failed — ${errMessage(err)}`)
+    } finally {
+      this.isSyncing = false
+      this.refreshPanel()
+    }
+  }
+
+  // Explicit historical import of AI artifacts only, over the artifact history window.
+  async runImportArtifacts(): Promise<void> {
+    if (this.isSyncing) {
+      new Notice('Carbon Voice: A sync is already running')
+      return
+    }
+    if (!this.settings.apiToken) {
+      new Notice('Carbon Voice: Add an API token in settings first')
+      return
+    }
+    if (!this.settings.includeAiResponses) {
+      new Notice('Carbon Voice: Turn on "Sync AI artifacts" first')
+      return
+    }
+    this.isSyncing = true
+    const notice = new Notice('Carbon Voice: Importing AI artifacts…', 0)
+    try {
+      const count = await this.sync.importArtifacts(this.settings.artifactHistoryWindow, n =>
+        notice.setMessage(`Carbon Voice: Importing AI artifacts… ${n} written`)
+      )
+      notice.hide()
+      new Notice(`Carbon Voice: Imported ${count} AI artifact(s)`)
+    } catch (err) {
+      notice.hide()
+      new Notice(`Carbon Voice: AI artifact import failed — ${errMessage(err)}`)
     } finally {
       this.isSyncing = false
       this.refreshPanel()
@@ -188,11 +218,23 @@ function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : 'unknown error'
 }
 
+// Result summary for a sync/import notice. AI responses are only mentioned when some were written,
+// so the message stays short for users who have the feature off or have no responses.
+function summarizeResult(res: SyncResult): string {
+  const parts = [
+    `${res.conversations} conversation file(s)`,
+    `${res.voiceMemos} voice memo(s)`,
+  ]
+  if (res.artifacts > 0) parts.push(`${res.artifacts} AI artifact(s)`)
+  return parts.join(', ')
+}
+
 // Toast text for a live sync/import. During the fetch phase we can only show how many messages
 // have come back; once notes start saving we show the running per-category counts.
 function progressMessage(prefix: string, p: SyncProgress): string {
   if (p.phase === 'fetching') {
     return `${prefix} fetched ${p.fetched} message${p.fetched === 1 ? '' : 's'}…`
   }
-  return `${prefix} ${p.voiceMemos} voice memo(s), ${p.conversations} conversation file(s)…`
+  const artifacts = p.artifacts > 0 ? `, ${p.artifacts} AI artifact(s)` : ''
+  return `${prefix} ${p.voiceMemos} voice memo(s), ${p.conversations} conversation file(s)${artifacts}…`
 }

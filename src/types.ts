@@ -1,5 +1,5 @@
 export type SyncScope = 'all' | 'by_workspace' | 'by_conversation' | 'by_folder'
-export type HistoryWindow = 7 | 30 | 90 | 365 | 'all'
+export type HistoryWindow = 7 | 30 | 90 | 365 | 'all' | 'none'
 // How a conversation's messages are chunked into note files: one file per calendar month, ISO
 // week (Monday-started), or day. All boundaries are UTC, matching the message-fetch windows.
 export type MessageGrouping = 'month' | 'week' | 'day'
@@ -81,6 +81,15 @@ export interface CarbonVoiceAttachment {
   length_in_bytes: number | null
 }
 
+// Reference to an AI response generated for a message. Carried on the v6 message payload so we
+// know which responses exist without a separate lookup; the response body itself is fetched on
+// demand via GET /responses/{id}. `prompt_id` names the prompt that produced it — resolved to a
+// human label via GET /prompts.
+export interface CarbonVoiceAiResponseRef {
+  id: string
+  prompt_id: string
+}
+
 export interface CarbonVoiceMessage {
   message_id: string
   creator_id: string
@@ -100,18 +109,14 @@ export interface CarbonVoiceMessage {
   text_models: CarbonVoiceTextModel[]
   attachments: CarbonVoiceAttachment[]
   notes: string
+  // AI responses attached to this message. The v6 payload carries these; the v3 endpoint omits
+  // them, which is why message → artifact links are also built from the /responses feed's
+  // message_ids.
+  ai_response_ids?: CarbonVoiceAiResponseRef[]
 }
 
-// Messages (v5 — used by /v5/messages/{id}, richer shape)
-
-export interface CarbonVoiceAudioInfo {
-  url: string | null
-  streaming_url: string | null
-  duration_ms: number | null
-  waveform_percentages: number[]
-  presigned_url: string | null
-  presigned_url_expiration_date: string | null
-}
+// Messages (v6 — GET /v6/messages, /v6/messages/updates and /v6/messages/{id}). The attachment
+// and time-code shapes are unchanged from v5, hence their names.
 
 export interface CarbonVoiceAttachmentV5 {
   id: string
@@ -126,26 +131,95 @@ export interface CarbonVoiceAttachmentV5 {
   presigned_url_expiration_date: string | null
 }
 
-export interface CarbonVoiceMessageV5 {
+export interface CarbonVoiceTimecodeV5 {
+  t: string
+  s: number
+  e: number
+}
+
+// One language's rendition of a v6 message: the audio plus the text derived from it. Replaces the
+// v5 top-level audio / language / transcript / ai_summary / time_codes fields. The server strips
+// null fields, so everything is optional.
+export interface CarbonVoiceMessageContentV6 {
+  ai_summary?: string | null
+  transcript?: string | null
+  time_codes?: CarbonVoiceTimecodeV5[]
+  is_original_language?: boolean | null
+  language?: string | null
+  url?: string | null
+  streaming_url?: string | null
+  // Only present when the request sets presigned_url=true.
+  presigned_url?: string | null
+  duration_ms?: number | null
+  // Base-36 string, one char per bar (decode with parseInt(ch, 36) / 35). Unused by the plugin.
+  waveform_percentage?: string | null
+}
+
+// A v6 message row: the MessageV6 items in `data` from GET /v6/messages (created_at order) and
+// GET /v6/messages/updates (last_updated_at order). Scope is single-valued (conversation_id /
+// workspace_id) where v3 used arrays. Content lives under `content`, which is omitted when the
+// message has neither audio nor text. `thread_id` replaces v5's parent_message_id: a message is a
+// reply exactly when thread_id !== id. `name` is the message's user-set title, omitted when it has
+// none.
+export interface CarbonVoiceMessageV6 {
   id: string
   type: MessageType
-  kind: MessageKind
+  kind?: MessageKind | null
   created_at: string
   updated_at: string
-  deleted_at: string | null
-  conversation_id: string
+  deleted_at?: string | null
+  conversation_id?: string | null
   workspace_id: string
   creator_id: string
   status: string
-  parent_message_id: string | null
-  folder_id: string | null
-  transcript: string | null
-  ai_summary: string | null
-  audio: CarbonVoiceAudioInfo | null
-  attachments: CarbonVoiceAttachmentV5[]
-  conversation_sequence: number | null
-  source_message_id: string | null
+  thread_id: string
+  folder_id?: string | null
+  attachments?: CarbonVoiceAttachmentV5[]
+  ai_response_ids?: CarbonVoiceAiResponseRef[]
+  content?: CarbonVoiceMessageContentV6
+  notes?: string | null
+  name?: string | null
   link: string
+}
+
+// AI responses (GET /responses/{id}). A response holds one variant per language; each variant
+// may carry text / html / markdown / structured json renderings of the same answer.
+export interface CarbonVoiceAiResponseVariant {
+  language: string | null
+  json: Record<string, unknown> | null
+  text: string | null
+  html: string | null
+  markdown: string | null
+}
+
+export interface CarbonVoiceAiResponse {
+  id: string
+  creator_id: string
+  prompt_id: string
+  created_at: string
+  last_updated_at: string
+  responses: CarbonVoiceAiResponseVariant[]
+  message_ids: string[]
+  workspace_id: string
+  channel_id: string
+}
+
+// Prompts (GET /prompts). Used to turn a response's `prompt_id` into a human-readable heading
+// (e.g. "Action Items", "Summary") in the note.
+export interface CarbonVoicePrompt {
+  id: string
+  created_at: string
+  last_updated_at: string
+  creator_id: string
+  workspace_id: string
+  prompt: string
+  name: string
+  description: string
+  format_instructions: string
+  response_format: string
+  owner_type: string
+  category_number: number
+  order_in_category: number
 }
 
 // Channels (conversations)
@@ -248,6 +322,9 @@ export interface CarbonVoiceSettings {
   syncFolder: string
   syncInterval: number
   includeTranscripts: boolean
+  // "Sync AI artifacts": write each AI response as a note under AI artifacts/ and link it from its
+  // source messages. When off, no /responses or /prompts calls are made.
+  includeAiResponses: boolean
   // Cross-link notes: generate People/Workspace stub notes and link participants, senders and
   // workspaces so the Obsidian graph and backlinks connect everything.
   linkNotes: boolean
@@ -255,6 +332,10 @@ export interface CarbonVoiceSettings {
   audioMode: AudioMode
   syncOnStartup: boolean
   lastSyncTimestamp: string | null
+  // Keyset resume cursor for the incremental updates feed (GET /v6/messages/updates; v5 and v6 share
+  // the cursor format, so one stored from v5 carries over). Once set, each sync continues from it;
+  // the date above only seeds the very first incremental request. Null until a request returns one.
+  updatesCursor: string | null
 
   conversationScope: SyncScope
   conversationWorkspaceIds: string[]
@@ -272,6 +353,9 @@ export interface CarbonVoiceSettings {
 
   conversationHistoryWindow: HistoryWindow
   voiceMemoHistoryWindow: HistoryWindow
+  // Window for the separate "Import AI artifacts" action — pulls artifacts from the /responses feed
+  // over this range, independent of the message import.
+  artifactHistoryWindow: HistoryWindow
 }
 
 export const DEFAULT_SETTINGS: CarbonVoiceSettings = {
@@ -284,10 +368,12 @@ export const DEFAULT_SETTINGS: CarbonVoiceSettings = {
   syncFolder: 'Carbon Voice',
   syncInterval: 15,
   includeTranscripts: true,
+  includeAiResponses: true,
   linkNotes: true,
   audioMode: 'off',
   syncOnStartup: true,
   lastSyncTimestamp: null,
+  updatesCursor: null,
 
   conversationScope: 'all',
   conversationWorkspaceIds: [],
@@ -301,4 +387,5 @@ export const DEFAULT_SETTINGS: CarbonVoiceSettings = {
 
   conversationHistoryWindow: 30,
   voiceMemoHistoryWindow: 30,
+  artifactHistoryWindow: 30,
 }
