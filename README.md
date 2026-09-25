@@ -50,30 +50,20 @@ into your Obsidian vault as Markdown notes.
     native player, so playback works offline (and for private audio).
   - _Off_ — no player, just the "Open in Carbon Voice" link.
 
-> **Status:** `0.1.1` — an early but working release. Account connection, all
-> sync configuration (scopes, folders, workspaces, history windows), forward
-> sync, and historical import are functional. As an early release, the note
-> format and settings may still change between versions, so consider a test
-> vault or a backup if that matters to you.
+> **Status:** `0.7.0` — listed in the Obsidian community plugin store. Account
+> connection, all sync configuration (scopes, folders, workspaces, history
+> windows), forward sync, historical import, and AI artifact sync are functional.
+> Still pre-1.0, so the note format and settings may change between versions —
+> consider a test vault or a backup if that matters to you.
 
 ## Installation
 
-### From the Community Plugins browser (once listed)
+The plugin is in the Obsidian community plugin directory:
+**[Carbon Voice Sync](https://community.obsidian.md/plugins/carbon-voice-sync)**.
 
-1. Open **Settings → Community plugins → Browse**.
-2. Search for **Carbon Voice Sync**.
-3. Click **Install**, then **Enable**.
-
-### Beta install via BRAT (available now)
-
-Before the plugin is listed in the community store, you can install and
-auto-update it with [BRAT](https://github.com/TfTHacker/obsidian42-brat) — this
-works on both desktop and mobile:
-
-1. Install the **BRAT** community plugin and enable it.
-2. In BRAT's settings, choose **Add Beta Plugin** and enter
-   `phononx/cv-obsidian-sync`.
-3. Enable **Carbon Voice Sync** under Community plugins.
+From inside Obsidian, open **Settings → Community plugins → Browse**, search for
+**Carbon Voice Sync**, then **Install** and **Enable**. Opening
+`obsidian://show-plugin?id=carbon-voice-sync` jumps straight to it in the app.
 
 ### Manual install
 
@@ -116,15 +106,31 @@ Releases are automated by `.github/workflows/release.yml`. To cut one:
 ```bash
 npm version <patch|minor|major>   # bumps package.json, manifest.json, versions.json
 git push --follow-tags            # pushes the branch and the version tag
+gh release edit <version> --draft=false --latest   # publish the draft
 ```
 
 Pushing the tag triggers a build and creates a **draft** GitHub release with
-`main.js`, `manifest.json`, and `styles.css` attached as assets. Review it and
-publish (drafts are invisible to BRAT and downloaders until published). The
-`npm version` step keeps `manifest.json` and `versions.json` in sync with the
-tag, and `.npmrc` sets `tag-version-prefix=""` so the tag has no `v` prefix —
-the release name then always matches the plugin version exactly, as Obsidian
+`main.js`, `manifest.json`, and `styles.css` attached as assets.
+
+**The third step is not optional.** A draft is invisible to the Obsidian
+updater and to anyone downloading manually — both resolve the latest
+*published* release, so until you publish, the previous version is still what
+everyone gets. Publish from the
+[releases page](https://github.com/phononx/cv-obsidian-sync/releases) or with
+the `gh` command above.
+
+Once published, the update reaches users on its own: because the plugin is
+listed in the community store, Obsidian reads new versions directly from this
+repo's releases. No pull request to `obsidianmd/obsidian-releases` is needed for
+a version bump — that is only for changing the listing's name, author,
+description, or repo in `community-plugins.json`.
+
+The `npm version` step keeps `manifest.json` and `versions.json` in sync with
+the tag, and `.npmrc` sets `tag-version-prefix=""` so the tag has no `v` prefix
+— the release name then always matches the plugin version exactly, as Obsidian
 requires. The workflow fails fast if the tag and manifest version disagree.
+`versions.json` maps each plugin version to its `minAppVersion`, so users on an
+older Obsidian are offered the newest version they can actually run.
 
 ## License
 
